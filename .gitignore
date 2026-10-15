@@ -1,0 +1,26 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Downloaded assets and generated experiment files
+/data/
+/datasets/
+/checkpoints/
+/outputs/
+/runs/
+/.cache/
+
+# Editor and operating system files
+.DS_Store
+*.swp
+*.swo
