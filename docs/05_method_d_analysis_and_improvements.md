@@ -4,18 +4,22 @@
 
 本文详细记录方法 D 的第一版实现，并作为后续讨论、对照实验和改进的记录入口。总体实验方案见 [04 最小 Affordance 决策测试](04_minimal_affordance_test.md)。
 
-**当前状态：D 初版已完成 5 张图、6 条调试任务的端到端运行；已补做固定点标签的 SAM 对照实验；改进方案尚未合入主程序。** 当前主程序仍使用“连通域内部中心点 → Noul 阈值 0.5 → 每个前景点配合全部背景点 → SAM 单 mask 输出 → 取并集”。
+**当前状态：D 初版已完成 5 张图、6 条调试任务的端到端运行；已补做固定点标签的 SAM 对照实验；代码已重构为仓库根目录的 `MethodD` 主类，使用独立 Miniconda 环境。算法改进方案尚未合入主程序。** 当前主程序仍使用“连通域内部中心点 → Noul 阈值 0.5 → 每个前景点配合全部背景点 → SAM 单 mask 输出 → 取并集”。
+
+2026-10-17 的结构调整把自动候选生成纳入 D，自行读取样本清单；旧 A/D 候选缓存作为可选输入。本文的算法步骤保持初版定义，代码入口和复现方式已更新。原始脚本可在 Git 提交 `3d57ce5` 中查看。
 
 本文分清三类内容：初版流程描述现有代码；结果与对照描述已经运行的实验；改进部分是待验证的假设，不代表当前实现已经改变。
 
 | 入口 | 作用 |
 | --- | --- |
-| [run_method_d.py](../scripts/run_method_d.py) | D 的命令行入口、模型调用、保存与评估 |
-| [method_d_utils.py](../scripts/method_d_utils.py) | 连通域中心点、标记图、SAM 点提示、点级评估 |
-| [run_method_a.py](../scripts/run_method_a.py) | A 的候选准备，以及 D 复用的请求、配置等工具 |
-| [method_a_utils.py](../scripts/method_a_utils.py) | D 复用的 Noul 解析、mask 合并与像素评估 |
+| [method_d.py](../method_d.py) | D 主类、候选生成、模型调用、保存与评估 |
+| [run_method_d.py](../run_method_d.py) | D 的命令行入口 |
+| [method_d_utils.py](../method_d_utils.py) | 连通域中心点、标记图、SAM 点提示、点级评估 |
+| [mask_utils.py](../mask_utils.py) | 候选过滤、Noul 解析、mask 合并与像素评估 |
+| [experiment_utils.py](../experiment_utils.py) | 清单校验、文件、模型元数据和可视化工具 |
+| [environment.yml](../environment.yml) | 独立 Miniconda 环境定义 |
 | [umd_debug.json](../configs/umd_debug.json) | 最初的调试样本清单 |
-| [D 运行配置](../outputs/method_d_debug/run.json) | 本次实际模型 revision、设备、精度与参数 |
+| [D 初版运行配置](../outputs/method_d_debug/run.json) | 初版实验的模型 revision、设备、精度与参数 |
 
 ## 1. 初版要解决什么问题
 
@@ -23,16 +27,19 @@
 
 D 使用自动分割候选来安排采样点，再通过点判断传递指令信息。一个点被接受，只说明模型认为该位置符合任务，不能据此接受整个原始候选。因此，初版会用预测前景点重新提示 SAM。
 
-当前程序依赖 A 已准备好的候选目录。**D 复用的是 A 的全部候选，不是 A 的 Valen 判断后接受的候选。** A 只需完成 `prepare` 阶段，D 就可以继续运行。
+当前程序默认由 `MethodD.prepare_image()` 直接生成候选。也可用 `candidate_cache` 导入兼容的旧 A/D 运行目录，以核对重构前后的结果。**导入旧 A 时，复用的是 A 的全部候选，不是 A 的 Valen 判断后接受的候选。** 候选内容和点算法保持一致，不再需要运行 A 脚本。
 
 ## 2. 初版流程图
 
 ```mermaid
 flowchart TD
-    IMAGE["原始 RGB 图像"] --> AUTO["A 的准备阶段：SAM 自动生成和过滤候选"]
-    AUTO --> CACHE["缓存全部候选 masks：K × H × W"]
+    IMAGE["原始 RGB 图像"]
+    OLD["可选：兼容的旧 A/D 候选缓存"]
 
-    subgraph METHOD_D["D 的当前实现"]
+    subgraph METHOD_D["根目录 MethodD 主类"]
+        IMAGE --> AUTO["SAM 自动生成和过滤候选"]
+        AUTO --> CACHE["全部候选 masks：K × H × W"]
+        OLD -.-> CACHE
         CACHE --> COMPONENTS["每个候选按 8 邻域拆分连通域"]
         COMPONENTS --> POINTS["每个连通域取内部中心点；相同坐标去重"]
         POINTS --> MARKED["P 张标记图：每张完整原图只标一个点"]
@@ -57,7 +64,7 @@ flowchart TD
 不支持 Mermaid 的阅读器可以看下面的文本流程：
 
 ```text
-A 缓存的全部候选 mask
+D 自行生成或从兼容缓存导入的全部候选 mask
     → 拆分连通域
     → 每个连通域取内部中心点并去重
     → 每点生成一张完整原图上的标记图
@@ -76,15 +83,15 @@ A 缓存的全部候选 mask
 
 | 变量 | 类型或形状 | 含义 |
 | --- | --- | --- |
-| `a_config` | 字典 | A 的运行配置，包括候选参数与阈值 |
-| `manifest` | 字典 | 当次样本清单，每条任务包含图片、指令等 |
+| `candidate_cache_config` | 可选的配置记录 | 导入缓存时记录原来的候选生成配置；当前点阈值独立设置 |
+| `manifest` | 字典 | `read_manifest()` 直接读取的当次样本清单，每条任务包含图片、指令等 |
 | `row` | 字典 | 当前任务，含 `id`、`image`、`instruction`、`candidate_key` 等 |
 | `config` | 字典 | 本次 D 的模型、提示模板、取点和分割配置 |
 | `rgb` | `uint8[H, W, 3]` | 原始 RGB 图像 |
-| 准备阶段的 `masks` / 任务阶段的 `candidates` | `bool[K, H, W]` | 从 A 复用的全部候选 |
+| 准备阶段的 `masks` / 任务阶段的 `candidates` | `bool[K, H, W]` | D 生成或导入的全部候选 |
 | `components` | `int32[K, H, W]` | 每个候选的连通域编号图，0 为候选外的像素 |
 | `points` | 长度为 `P` 的列表 | 点 ID、整数坐标和来源映射 |
-| `point_sets` | 以 `candidate_key` 为键的字典 | 按图片缓存点集、数量和取点耗时 |
+| `self._prepared` | 以完整图像 SHA-256 为键的字典 | 缓存 `PreparedImage`：原图、候选、连通域、点及元数据 |
 | `records` | 长度为 `P` 的列表 | 每点的请求、响应、Noul 分数、判断和耗时 |
 | `scores` | 长度为 `P` 的浮点列表 | 每点的 Noul true 分数 |
 | `prompts` | 长度为 `F` 的列表 | 每个预测前景点对应的一组 SAM 提示 |
@@ -102,32 +109,28 @@ A 缓存的全部候选 mask
 
 ### 4.1 读取配置，确定本次任务
 
-当前命令行参数只有 `--a-run`、`--output` 和 `--device`，默认分别为 `outputs/method_a_debug`、`outputs/method_d_debug`、`cuda:1`。
+当前根目录入口 `run_method_d.py` 支持 `--manifest`、`--output`、`--device`、`--threshold` 和可选的 `--candidate-cache`。默认清单为 `configs/umd_debug.json`，输出为 `outputs/method_d_run`，设备为 `cuda:1`，阈值为 0.5。
 
-程序首先读取 A 输出目录下的 `run.json` 和 `manifest.json`，检查 `method == 'A'`、`prepared == true`，并核对本地模型的验证记录与 revision。当前随机种子为 0。
+主类初始化时校验阈值，建立新输出目录，固定随机种子为 0；模型按需加载。`run_manifest()` 通过 `read_manifest()` 检查任务 ID、指令、文件路径和图像内容哈希，并保存当次清单。`threshold` 由当前实例设置，不再继承旧 A 配置。
 
-`config['threshold']` 继承 `a_config['threshold']`，本次为 0.5；D 当前没有单独的 `--threshold` 参数。D 也不会重新读取最新的 `configs/umd_debug.json`，因此修改原始清单后，已有 A 输出中的清单不会自动变化。
+导入候选缓存时额外检查它来自 A/D，候选准备完成，SAM revision、候选生成和过滤配置兼容。候选像素数组还要匹配当前图像哈希、尺寸和布尔类型。
 
-GT 路径 `label` 和类别 `target_label` 用于最后的评估。通过 A 准备清单时，这两个字段可以同时省略，以便仅生成预测。
+GT 路径 `label` 和类别 `target_label` 只用于最后评估，可以同时省略。输出目录必须是新目录，任务 ID 也不能在同一目录中重复使用。
 
-输出目录必须是新目录，已存在时程序报错，以免覆盖旧实验。随后保存本次 `manifest.json` 和 `run.json`。
+### 4.2 生成或导入每张图片的全部候选
 
-### 4.2 复用每张图片的全部候选
-
-`candidate_key` 是 A 根据图像 SHA-256 前 16 位生成的键。D 按这个键去重处理图片，并检查当前图像内容是否与 A 运行时一致。
-
-程序复制 `A输出/candidates/<key>/`，从其中读取：
+`candidate_key` 是图像 SHA-256 的前 16 位，用于目录名称；主类用完整 SHA-256 缓存 `PreparedImage`。相同内容的图片可复用候选和点，换指令时重新执行判断。
 
 ```python
-masks = archive['masks']  # masks.npz，bool[K, H, W]
-rgb = np.array(Image.open(directory / 'original.png').convert('RGB'))
+prepared = pipeline.prepare_image(image_path)
+rgb = prepared.rgb                 # uint8[H, W, 3]
+candidates = prepared.candidates   # bool[K, H, W]
+points = prepared.points
 ```
 
-候选可能重叠、嵌套，且一个候选可以包含多个连通域。复制目录也会保留 A 的高亮图等文件，但 D 的 Valen 判断使用后续生成的点标记图。
+默认路径由 `_generate_candidates()` 使用 SAM 2.1 small 生成并过滤候选。算法参数保持初版：每边 32 个自动采样点、1 层 crop、预测 IoU 阈值 0.8、稳定性阈值 0.95、`min_mask_region_area=0`；过滤空 mask 和 IoU 不低于 0.90 的重复候选，最多保留 24 个。超过上限时按面积排序分组保留，以覆盖不同大小的候选。
 
-本次候选来自 SAM 2.1 small。主要上游配置为每边 32 个自动采样点、1 层 crop、预测 IoU 阈值 0.8、稳定性阈值 0.95、`min_mask_region_area=0`；候选过滤去掉空 mask 和 IoU 不低于 0.90 的重复候选，最多保留 24 个。超出上限时按面积排序分组保留，以覆盖不同大小的候选。完整参数以 [A 运行配置](../outputs/method_a_debug/run.json) 为准。
-
-这里没有再次执行自动候选生成，也没有读取 A 的 `selected_ids`。
+指定 `candidate_cache` 时读取旧运行的 `candidates/<key>/`，校验后复制到新输出目录，跳过自动候选生成。无论哪种路径，候选都可以重叠、嵌套和包含多个连通域，也都不读取 A 的接受分数或 `selected_ids`。
 
 ### 4.3 拆分连通域，计算内部中心点并去重
 
@@ -160,7 +163,7 @@ rgb = np.array(Image.open(directory / 'original.png').convert('RGB'))
 }
 ```
 
-保存 `components.npz` 和 `points.json`，并在 `point_sets[key]` 中记录点集、连通域数、点数、耗时和来源 mask 文件哈希。同图换指令时，这些内容全部复用。
+保存 `components.npz` 和 `points.json`，并在 `PreparedImage.point_metadata` 中记录点集、连通域数、点数、耗时和来源 mask 文件哈希。同图换指令时，这些内容全部复用。
 
 **初版没有额外过滤微小连通域，没有最小点间距规则，也没有固定点数上限。** 例如本次勺子图的 16 个候选产生了 35 个连通域和 35 个点。
 
@@ -174,7 +177,7 @@ rgb = np.array(Image.open(directory / 'original.png').convert('RGB'))
 
 程序加载本地 SAM 2.1 small 和 Valen-4B，分别预热并记录加载、预热耗时。GPU 上 SAM 使用 bfloat16 autocast；Valen 主干使用 bfloat16，决策头保留 float32，使用 `sdpa`、`execution='shared_state'`、`temperature=1.0`。
 
-对每条任务，依次遍历 `P` 个点。每次通过复用的 `request_for()` 构造请求，实际输入为“完整点标记图 + 当前任务指令 + 固定判断说明”。Valen 不单独接收坐标数组，也不接收候选 mask 数组。
+对每条任务，依次遍历 `P` 个点。每次通过主类的 `_request()` 构造请求，实际输入为“完整点标记图 + 当前任务指令 + 固定判断说明”。Valen 不单独接收坐标数组，也不接收候选 mask 数组。
 
 当前英文提示模板为：
 
@@ -239,7 +242,7 @@ negatives = [i for i, score in enumerate(scores) if score < threshold]
 
 有可用提示时，使用未经标记的原图调用 `predictor.set_image(rgb)`。图像特征保存在 `predictor` 内，同图的所有提示复用这份特征。
 
-`embedding_key` 记录当前已编码的图片。连续处理同图的不同指令时也可复用；它不是保存全部图片特征的字典，换图后再回来仍需要重新编码。
+`self._embedding_key` 记录当前已编码的图片。连续处理同图的不同指令时也可复用；它不是保存全部图片特征的字典，换图后再回来仍需要重新编码。
 
 随后逐次调用：
 
@@ -350,12 +353,12 @@ SAM 第 2 次输出： 105 个前景像素，quality ≈ 0.3633
 ```text
 outputs/method_d_debug/
 ├── run.json                         # D 配置、模型版本、加载和预热耗时
-├── manifest.json                    # 从 A 继承的当次样本清单
+├── manifest.json                    # run_manifest() 直接读取并保存的当次样本清单
 ├── candidates/<candidate_key>/      # 按图片保存，同图不同任务共享
 │   ├── original.png
-│   ├── masks.npz                    # A 的全部候选
-│   ├── metadata.json                # A 的候选元数据和生成耗时
-│   ├── mask_XXX.png                 # A 的逐候选 mask
+│   ├── masks.npz                    # D 生成或导入的全部候选
+│   ├── metadata.json                # 候选元数据和生成耗时
+│   ├── mask_XXX.png                 # 逐候选 mask
 │   ├── components.npz               # 各候选的连通域编号图
 │   ├── points.json                  # 点坐标、来源、数量和耗时
 │   ├── point_XXX.png                # 实际给 Valen 的单点标记图
@@ -376,35 +379,67 @@ outputs/method_d_debug/
 └── overview.jpg
 ```
 
-候选目录还包含随 A 目录复制过来的高亮图等文件，上面没有逐项列出。运行日志不是 D 自动创建的，而是运行命令通过输出重定向保存到 [method_d_debug.log](../outputs/method_d_debug.log)。
+导入旧 A 缓存时，候选目录还会包含复制过来的高亮图等文件，上面没有逐项列出。运行日志不是 D 自动创建的，而是运行命令通过输出重定向保存到 [method_d_debug.log](../outputs/method_d_debug.log)。
 
-### 6.2 运行示例
+### 6.2 重构后的运行示例
 
-在仓库根目录执行。若复用现有 A 候选，并重新运行 D，需要选择一个尚不存在的输出目录：
-
-```bash
-.venv/bin/python -u scripts/run_method_d.py \
-  --a-run outputs/method_a_debug \
-  --output outputs/method_d_debug_rerun \
-  --device cuda:1
-```
-
-如果更换清单，需要先准备新的 A 候选目录；例如：
+环境创建与模型安装见 [仓库 README](../README.md)。当前机器使用 Miniconda 的独立环境 `systemone-affordance`，不依赖原来的 `.venv`。在仓库根目录运行：
 
 ```bash
-.venv/bin/python -u scripts/run_method_a.py \
+source /home/hri/miniconda3/etc/profile.d/conda.sh
+conda activate systemone-affordance
+unset PYTHONPATH
+python run_method_d.py \
   --manifest configs/umd_debug.json \
-  --stage prepare \
-  --output outputs/method_a_prepare_rerun \
-  --device cuda:1
-
-.venv/bin/python -u scripts/run_method_d.py \
-  --a-run outputs/method_a_prepare_rerun \
-  --output outputs/method_d_from_prepare_rerun \
+  --output outputs/method_d_run \
   --device cuda:1
 ```
 
-以上是复现命令示例，新增本文时没有重新运行实验。数据、模型和 `outputs/` 被 Git 忽略；本文的结果链接指向本机已有产物，其他 checkout 需要自行准备或复制这些资源。
+上面的默认流程直接生成候选。要复用旧 A 候选做重构回归比较，使用一个新输出目录并增加参数：
+
+```bash
+python run_method_d.py \
+  --manifest configs/umd_debug.json \
+  --candidate-cache outputs/method_a_debug \
+  --output outputs/method_d_cached_rerun \
+  --device cuda:1
+```
+
+也可以直接使用根目录主类：
+
+```python
+from method_d import MethodD
+
+with MethodD(device="cuda:1", output_dir="outputs/my_prediction") as pipeline:
+    result = pipeline.predict(
+        "data/umd/tools/knife_01/knife_01_00000122_rgb.jpg",
+        "Find all parts used to cut other objects.",
+        sample_id="knife_cut",
+    )
+    mask = result.mask
+    points = result.prepared.points
+    records = result.records
+    segmentations = result.segmentations
+```
+
+`predict()` 不接受 GT；`run_manifest()` 在预测完成后执行可选评估。省略 `output_dir` 时，主类使用临时目录，`close()` 或退出 `with` 后清理文件；返回的数组仍可使用。需要保留中间文件时指定新输出目录。
+
+数据、模型和 `outputs/` 被 Git 忽略；本文的历史结果链接指向本机已有产物，其他 checkout 需要自行准备或复制这些资源。根目录主类保持了原有算法参数；后文结果表记录的是最初运行与诊断，不将结构重构误写为算法改善。
+
+### 6.3 结构重构与环境迁移的回归结果
+
+2026-10-17 在 `/home/hri/miniconda3/envs/systemone-affordance` 中完成验证。原环境是继承其他 Conda 环境包的 `.venv`；新环境独立安装 Python 3.10、PyTorch 2.6.0+cu124、Transformers 5.4.0 和固定提交的 SAM 2。实际导入路径均来自新环境，`pip check` 和 18 项测试通过。
+
+对同一份 `configs/umd_debug.json` 运行了两条路径，比较基准为 `outputs/method_d_debug`：
+
+| 路径 | 输出目录 | 与初版比较 |
+| --- | --- | --- |
+| 导入旧 A 候选 | [method_d_refactor_cached](../outputs/method_d_refactor_cached/summary.json) | 候选、点、分数、分割和评估完全一致 |
+| D 独立生成候选 | [method_d_refactor_native](../outputs/method_d_refactor_native/summary.json) | 候选、点、分数、分割和评估完全一致 |
+
+每条路径均完成 5 张图、6 条任务、111 次正式点判断和 15 次正式 SAM 点提示分割。111 个 Noul 分数的最大绝对差为 0；15 个单独分割 mask 和 6 个最终 mask 的不同像素数均为 0；平均 IoU 均为 **0.12417274710307265**。这验证了当前调试集上的行为保持一致，后续算法改进仍需另做实验。
+
+逐项记录见 [回归比较 JSON](../outputs/method_d_refactor_validation.json)。新运行的 `run.json` 记录了 Python 可执行文件和环境路径，可用于确认实验环境。
 
 ## 7. 首轮结果揭示的问题
 

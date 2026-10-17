@@ -1,4 +1,4 @@
-"""Small, model-independent pieces of the region decision baseline."""
+"""Candidate filtering, binary-mask operations, and offline evaluation for D."""
 import math
 
 import numpy as np

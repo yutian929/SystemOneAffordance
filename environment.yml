@@ -1,0 +1,14 @@
+name: systemone-affordance
+channels:
+  - conda-forge
+  - nodefaults
+variables:
+  PYTHONNOUSERSITE: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools=79.0.1
+  - wheel
+  - pip:
+      - -r requirements.txt

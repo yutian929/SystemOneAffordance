@@ -1,6 +1,7 @@
-# Tested with Python 3.10 and CUDA 12.4 PyTorch wheels.
-torch==2.6.0
-torchvision==0.21.0
+# Python 3.10 in the independent Miniconda environment; preserve baseline CUDA wheels.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
 transformers==5.4.0
 av==16.1.0
 numpy==2.2.6

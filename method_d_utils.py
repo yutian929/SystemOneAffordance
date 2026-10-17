@@ -1,4 +1,4 @@
-"""Deterministic component-center sampling and point prompts for method D."""
+"""Deterministic component-center sampling, point prompts, and evaluation for D."""
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy.ndimage import label

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from method_d_utils import component_centers, evaluate_points, mark_point, sam_point_prompts
 
 

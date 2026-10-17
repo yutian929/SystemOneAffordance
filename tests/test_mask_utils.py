@@ -5,11 +5,11 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from method_a_utils import evaluate, merge_masks, read_noul, select_candidates
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from mask_utils import evaluate, merge_masks, read_noul, select_candidates
 
 
-class MethodATest(unittest.TestCase):
+class MaskUtilsTest(unittest.TestCase):
     def test_union_keeps_disconnected_regions_and_threshold_ties(self):
         masks = np.zeros((3, 6, 6), dtype=bool)
         masks[0, 0, 0] = True

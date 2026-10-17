@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-os.environ.setdefault('HF_HOME', str(ROOT / '.cache/huggingface'))
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 os.environ.setdefault('HF_HUB_DISABLE_IMPLICIT_TOKEN', '1')
 os.environ.setdefault('SSL_CERT_FILE', '/etc/ssl/certs/ca-certificates.crt')
