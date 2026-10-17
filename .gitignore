@@ -15,6 +15,7 @@ __pycache__/
 # Downloaded assets and generated experiment files
 /data/
 /datasets/
+/models/
 /checkpoints/
 /outputs/
 /runs/

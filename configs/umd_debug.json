@@ -1,0 +1,48 @@
+{
+  "split": "debug_only",
+  "note": "Five Tools tasks plus one Clutter task. Middle frame of each chosen sequence; annotation provenance not independently checked. This is not a benchmark split. Instructions are hand-written category templates. Negative GT labels are ignored only during evaluation.",
+  "samples": [
+    {
+      "id": "knife_grasp",
+      "image": "data/umd/tools/knife_01/knife_01_00000122_rgb.jpg",
+      "instruction": "Find all handles used to grasp and hold a tool or an object.",
+      "label": "data/umd/tools/knife_01/knife_01_00000122_label.mat",
+      "target_label": 1
+    },
+    {
+      "id": "knife_cut",
+      "image": "data/umd/tools/knife_01/knife_01_00000122_rgb.jpg",
+      "instruction": "Find all parts used to cut other objects.",
+      "label": "data/umd/tools/knife_01/knife_01_00000122_label.mat",
+      "target_label": 2
+    },
+    {
+      "id": "mug_grasp",
+      "image": "data/umd/tools/mug_01/mug_01_00000151_rgb.jpg",
+      "instruction": "Find all handles used to grasp and hold a tool or an object.",
+      "label": "data/umd/tools/mug_01/mug_01_00000151_label.mat",
+      "target_label": 1
+    },
+    {
+      "id": "spoon_scoop",
+      "image": "data/umd/tools/spoon_01/spoon_01_00000172_rgb.jpg",
+      "instruction": "Find all parts used to scoop up material.",
+      "label": "data/umd/tools/spoon_01/spoon_01_00000172_label.mat",
+      "target_label": 3
+    },
+    {
+      "id": "hammer_pound",
+      "image": "data/umd/tools/hammer_01/hammer_01_00000137_rgb.jpg",
+      "instruction": "Find all parts used to strike or pound other objects.",
+      "label": "data/umd/tools/hammer_01/hammer_01_00000137_label.mat",
+      "target_label": 5
+    },
+    {
+      "id": "clutter_grasp",
+      "image": "data/umd/clutter/scene_01/scene_01_00000166_rgb.jpg",
+      "instruction": "Find all handles used to grasp and hold a tool or an object.",
+      "label": "data/umd/clutter/scene_01/scene_01_00000166_label.mat",
+      "target_label": 1
+    }
+  ]
+}
