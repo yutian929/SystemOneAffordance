@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from utils.partition import validate_partition
+from common.partition import validate_partition
 
 
 def read_image(image):

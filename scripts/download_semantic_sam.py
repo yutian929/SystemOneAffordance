@@ -8,9 +8,9 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils.io import file_digest, write_json
-from utils.models import validate_semantic_source
-from utils.settings import (SEMANTIC_SAM_MODEL, SEMANTIC_SAM_CODE_URL,
+from common.io import file_digest, write_json
+from common.models import validate_semantic_source
+from common.settings import (SEMANTIC_SAM_MODEL, SEMANTIC_SAM_CODE_URL,
                             SEMANTIC_SAM_CODE_REVISION, SEMANTIC_SAM_DETECTRON_URL,
                             SEMANTIC_SAM_DETECTRON_REVISION, SEMANTIC_SAM_CHECKPOINT_SHA256)
 

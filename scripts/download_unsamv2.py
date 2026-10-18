@@ -9,11 +9,11 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils.settings import (UNSAMV2_PLUS, UNSAM_CHECKPOINT_SHA256 as CHECKPOINT_SHA256,
+from common.settings import (UNSAMV2_PLUS, UNSAM_CHECKPOINT_SHA256 as CHECKPOINT_SHA256,
                             UNSAM_CHECKPOINT_URL as CHECKPOINT_URL,
                             UNSAM_CODE_REVISION as CODE_REVISION, UNSAM_CODE_URL as CODE_URL)
-from utils.io import file_digest, write_json
-from utils.models import validate_source
+from common.io import file_digest, write_json
+from common.models import validate_source
 
 CHECKPOINT_NAME = UNSAMV2_PLUS['checkpoint_name']
 

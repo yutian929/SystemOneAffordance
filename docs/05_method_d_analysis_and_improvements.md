@@ -12,7 +12,7 @@
 | --- | --- |
 | [dense_partition.py](../dense_partition.py) | 基类、三种算法实现、统一工厂 |
 | [config.py](../config.py) | 参数、模型资源与 debug 图片 |
-| [utils](../utils/) | 通用分区转换、验证、导出、推理和可视化 |
+| [common](../common/) | 通用分区转换、验证、导出、推理和可视化 |
 | [environment.yml](../environment.yml) | Miniconda 环境定义 |
 
 ## 1. 初版要解决什么问题
@@ -951,9 +951,9 @@ for region_id, mask in iter_masks("<某个分区目录>/masks.npz"):
 根目录只有两个 Python 文件：
 
 - `dense_partition.py`：抽象基类 `DensePartition`、`SAM21Partition`、`UnSAMv2PlusPartition`、`SLICPartition` 和统一工厂。
-- `config.py`：运行设备、UnSAMv2+ 的三个 Demo 控制项、SLIC 常用参数和 debug 图片列表。模型资源与内部设置位于 `utils/settings.py`。
+- `config.py`：运行设备、UnSAMv2+ 的三个 Demo 控制项、SLIC 常用参数和 debug 图片列表。模型资源与内部设置位于 `common/settings.py`。
 
-`utils/` 保存通用图像读取、分区转换与验证、结果类型、Mask 导出、模型进程适配和可视化。`scripts/` 只有 SAM 2.1 和 UnSAMv2+ 两个模型下载脚本。
+`common/` 保存通用图像读取、分区转换与验证、结果类型、Mask 导出、模型进程适配和可视化。`scripts/` 只有 SAM 2.1 和 UnSAMv2+ 两个模型下载脚本。
 
 ### 13.2 统一契约与中间变量
 

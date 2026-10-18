@@ -7,28 +7,30 @@
 ```text
 dense_partition.py     # 抽象基类、四种实现、统一工厂及命令行入口
 config.py              # 日常调节项、设备、debug 图片
-utils/
-  partition.py         # 解重叠、补齐区域、连通域、验证
+common/
+  partition.py         # 解重叠、补齐区域、连通域、小区域合并、验证
   settings.py          # 模型资源、官方 Demo 内部设置与参数校验
   result.py            # PartitionResult：标签图、Mask 访问与保存
   io.py                # 图像读取、哈希、JSON、无损 Mask 导出与读取
-  models.py            # 模型资源检查与独立推理进程
-  semantic_sam_adapter.py # Semantic-SAM 原图尺寸还原与运行兼容
+  models.py            # 各模型的资源检查、推理、尺寸还原与运行兼容
   visualization.py     # 边界图、总览、交互查看页面
-  cli.py               # 单图或批量运行
 scripts/
   download_sam2.py      # 仅下载 SAM 2.1
   download_unsamv2.py   # 仅下载 UnSAMv2+ 权重及固定版本源码
   download_semantic_sam.py # Semantic-SAM 权重、固定源码及 Detectron2 编译
-  semantic_sam_worker.py # 使用当前 Conda Python 的独立推理进程
 tests/test_dense_partition.py
 tests/test_semantic_sam.py
+tests/test_small_regions.py
 docs/
 environment.yml
 requirements.txt
 requirements-sam.txt
 requirements-semantic-sam.txt
 ```
+
+全覆盖分割功能的命令行逻辑直接写在 `dense_partition.py` 的 `if __name__ == '__main__':` 中，负责参数解析、单图或批量运行及结果导出。
+
+SAM 2.1、UnSAMv2+、Semantic-SAM 的推理都归入 `common/models.py`，统一通过当前 Conda Python 启动短生命周期子进程。Semantic-SAM 的尺寸还原和兼容处理也在该模块内完成；本项目使用 `common` 包名，与其官方 `utils` 包可以同时导入。
 
 旧 `configs/` 目录、完整 D 流程、Valen 判断、取点、任务指令和 GT 评估代码已经移除。历史实验保留在 `docs/` 和本地 `outputs/`；旧实现可从 Git 提交 `3d62972` 查看。数据、模型、输出不纳入 Git。
 
@@ -84,6 +86,7 @@ python scripts/download_unsamv2.py
 | --- | --- |
 | `DEFAULT_METHOD` | Python API 默认 `slic`；命令行未指定 `--method` 时运行全部方法 |
 | `DEVICE` | 当前 `cuda:1`，单卡机器改为 `cuda:0`。SLIC 始终使用 CPU |
+| `MIN_MASK_AREA` | 所有方法统一的后处理阈值，默认 `16`：面积严格小于 16 个原图像素的区域并入邻居；`0` 关闭 |
 | `UNSAMV2_PLUS.granularity` | 范围 `[0.1, 1.0]`，越小倾向越细；HF Demo 初始值为 `0.15` |
 | `UNSAMV2_PLUS.pred_iou_thresh` | 对应 Predicted IoU threshold；降低保留更多候选，HF Demo 默认 `0.77` |
 | `UNSAMV2_PLUS.stability_score_thresh` | 对应 Stability threshold；降低筛选更宽松，HF Demo 默认 `0.9` |
@@ -92,11 +95,13 @@ python scripts/download_unsamv2.py
 | `DEBUG_IMAGES` | 5 张不同的 debug 图片，只有图片路径，不包含任务指令或标注 |
 | `OUTPUT_DIR` | 默认 `outputs/dense_partition` |
 
-SAM 2.1 直接使用官方自动生成器默认值。UnSAMv2+ 独立使用上述三个控制项，其余采样设置参考 [官方 HF Demo 源码](https://huggingface.co/spaces/yujunwei04/UnSAMv2/blob/675a2bceabf284b69d5d537a3aa798b53c50a8ff/app.py)，不再与 SAM 共用一组生成参数。模型资源与内部设置在 `utils/settings.py`；`model_config='configs/…yaml'` 是第三方包内部资源路径。
+SAM 2.1 直接使用官方自动生成器默认值。UnSAMv2+ 独立使用上述三个控制项，其余采样设置参考 [官方 HF Demo 源码](https://huggingface.co/spaces/yujunwei04/UnSAMv2/blob/675a2bceabf284b69d5d537a3aa798b53c50a8ff/app.py)，不再与 SAM 共用一组生成参数。模型资源与内部设置在 `common/settings.py`；`model_config='configs/…yaml'` 是第三方包内部资源路径。
 
 Semantic-SAM 使用官方 Swin-T 权重和 `SemanticSamAutomaticMaskGenerator`，只传入 `level`，其他生成参数采用官方默认值。按官方 `prepare_image` 将短边缩放到 640，生成候选后使用最近邻还原至原图分辨率，再进入统一分区流程。`level` 的含义见 [官方用法](https://github.com/UX-Decoder/Semantic-SAM#-a-few-lines-to-get-generated-results)；它是离散层级列表，可填写 `[3]`、`[6]` 或组合，不能直接等同于目标 Mask 数。公开权重只在 SA-1B 上训练，这里输出多粒度候选，不输出 affordance 或语义类别标签。
 
-最终分区只消除重叠、补齐未覆盖区域并拆分连通域，已移除额外的小区域合并。HF Demo 最多展示前 1000 个原始候选，本地保留全部候选后建立严格分区，因此最终 Mask 数及展示方式不等同于 Demo。
+最终分区先消除重叠、补齐未覆盖区域并拆分连通域，再按 `MIN_MASK_AREA` 合并小区域。合并在 `common/partition.py` 的 `merge_small_regions()` 中实现，由 `DensePartition.segment()` 对四种方法统一调用：从最小区域开始，并入共享边界最长的上下左右相邻区域；共享边界相同时优先面积更大的邻居，再按区域 ID 决定。每次合并后更新面积和邻接关系，直到所有区域达到阈值或整图仅剩一个区域；若整张图片面积就小于阈值，保留这一个区域。阈值 `16` 用于清除少量像素的碎片，面积恰好 16 的区域保留；设置为 `0` 恢复不合并的行为。
+
+Raw 候选与原始覆盖率不受此合并影响。HF Demo 最多展示前 1000 个原始候选，本地保留全部候选后建立严格分区，因此最终 Mask 数及展示方式不等同于 Demo。
 
 ## Python 使用
 
@@ -114,7 +119,7 @@ for region_id, mask in result.iter_masks():
 result.save("outputs/my_partition")  # 必须使用新目录
 ```
 
-输入也支持 PIL 图像或 `uint8[H,W,3]` RGB 数组。`result.masks` 可一次生成 `bool[K,H,W]`，大图建议逐个读取以节约内存。`result.rgb` 和 `result.labels` 默认只读；`result.metadata` 记录配置、原模型覆盖率与耗时。`result.owners` 为原始模型候选索引加一，0 表示原模型未覆盖；SLIC 的该字段为 `None`。`owners` 记录来源，最终标签还会拆分连通域并重新编号。
+输入也支持 PIL 图像或 `uint8[H,W,3]` RGB 数组。`result.masks` 可一次生成 `bool[K,H,W]`，大图建议逐个读取以节约内存。`result.rgb` 和 `result.labels` 默认只读；`result.metadata` 记录配置、原模型覆盖率与耗时。`result.owners` 为原始模型候选索引加一，0 表示原模型未覆盖；SLIC 的该字段为 `None`。`owners` 始终记录合并前的像素来源，最终标签会拆分连通域、合并小区域并重新编号，因此一个最终 Mask 可以包含多个来源。
 
 需要在调用时改变参数，可先取得独立配置；修改不会影响其他实例：
 
@@ -157,6 +162,8 @@ python dense_partition.py --method slic --output outputs/slic_debug
 
 `summary.json` 开头的 `config` 按方法保存本次运行的参数快照。完成模型推理后，`generator` 会包含官方默认值和本次覆盖值；UnSAMv2+ 的粒度位于 `model.granularity`，两个过滤阈值位于 `generator`。以后修改 `config.py` 不会改变已有结果记录的参数。
 
+小区域合并阈值保存在 `config.postprocess.min_mask_area`；每个分区的 `metadata.json` 中，`postprocess` 记录阈值、合并前后区域数及合并次数。历史输出不会随阈值修改而更新。
+
 Semantic-SAM 的层级记录在 `generator.level`；`backend` 保存源码版本、实际 Python、输入缩放尺寸及 attention 实现。其原始候选以原图尺寸保存，`raw_proposals` 中的 `area` / `bbox` / `point_coords` / `crop_box` 也转换至原图坐标；`inference_geometry` 另外保留上游推理尺寸的记录，其中提示点是上游的归一化坐标。
 
 ```text
@@ -179,7 +186,7 @@ partitions/<图像内容哈希>/<方法>/
 
 ```python
 import numpy as np
-from utils.io import iter_masks
+from common.io import iter_masks
 
 labels = np.load("<分区目录>/labels.npy", allow_pickle=False)
 for region_id, mask in iter_masks("<分区目录>/masks.npz"):
@@ -190,7 +197,7 @@ for proposal_id, mask in iter_masks("<模型分区目录>/raw_masks.npz"):
     print(proposal_id, mask.sum())
 ```
 
-SAM / UnSAM / Semantic-SAM 的原始候选先按小区域优先消除重叠，再将所有区域（包括未覆盖像素）拆成连通域。模型分别使用当前 Conda 的 Python 在短生命周期子进程中运行，以隔离同名 `sam2` / `utils` 包并释放显存；每张图都需要重新加载模型。SLIC 直接生成分区。基类检查正整数连续编号、原分辨率和 4 连通性；导出时再读取二值 Mask，逐像素检查 `sum(masks[:, y, x]) == 1`。
+SAM / UnSAM / Semantic-SAM 的原始候选先按小区域优先消除重叠，再将所有区域（包括未覆盖像素）拆成连通域。模型分别使用当前 Conda 的 Python 在短生命周期子进程中运行，以隔离两套 `sam2` 包并释放显存；每张图都需要重新加载模型。SLIC 直接生成分区，随后与模型方法一样执行小区域合并。基类检查正整数连续编号、原分辨率和 4 连通性；导出时再读取二值 Mask，逐像素检查 `sum(masks[:, y, x]) == 1`。
 
 全覆盖是输出结构保证，不能作为分割准确率；模型漏覆盖区域补齐后也不代表模型识别出了这些区域。当前不进行模型与 SLIC 求交细分，四种方法各自独立输出。
 

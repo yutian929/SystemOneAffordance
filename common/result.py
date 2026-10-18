@@ -6,9 +6,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from utils.io import export_partition, export_raw_segmentation, write_json
-from utils.partition import validate_partition
-from utils.visualization import contact_sheet, render_partition, render_raw_masks
+from common.io import export_partition, export_raw_segmentation, write_json
+from common.partition import validate_partition
+from common.visualization import contact_sheet, render_partition, render_raw_masks
 
 
 @dataclass(frozen=True)

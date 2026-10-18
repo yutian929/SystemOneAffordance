@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dense_partition import (DensePartition, SAM21Partition, UnSAMv2PlusPartition,
                              SemanticSAMPartition, SLICPartition)
 from config import get_config
-from utils.io import export_partition, iter_masks
-from utils.partition import connected_labels, resolve_masks, validate_partition
+from common.io import export_partition, iter_masks
+from common.partition import connected_labels, resolve_masks, validate_partition
 from unittest.mock import patch
 from PIL import Image
 import json
@@ -154,8 +154,9 @@ class CommonAPITest(unittest.TestCase):
                    dict(predicted_iou=.6, stability_score=.8)]
         for method in ('sam2', 'unsamv2-plus', 'semantic-sam'):
             settings = get_config(method)
+            settings['postprocess']['min_mask_area'] = 0  # Inspect overlap resolution before merging.
             backend = {'generator': settings['generator']}
-            with patch('utils.models.generate_proposals', return_value=(masks, records, backend)):
+            with patch('common.models.generate_proposals', return_value=(masks, records, backend)):
                 result = DensePartition.create(method, settings).segment(rgb)
             self.assertEqual(result.owners[3, 4], 2)
             self.assertEqual(result.owners[0, 0], 0)
@@ -175,7 +176,7 @@ class CommonAPITest(unittest.TestCase):
                 self.assertAlmostEqual(metadata['raw_output']['overlap_fraction'], 6 / 72)
                 for name in ('raw_overlay.png', 'raw_boundaries.png', 'raw_coverage.png', 'comparison.jpg'):
                     self.assertTrue((directory / name).is_file(), name)
-            with patch('utils.models.generate_proposals', return_value=(np.zeros((0, 8, 9), bool), [], backend)):
+            with patch('common.models.generate_proposals', return_value=(np.zeros((0, 8, 9), bool), [], backend)):
                 empty = DensePartition.create(method, settings).segment(rgb)
             self.assertEqual(empty.region_count, 1)
             self.assertEqual(empty.metadata['raw_coverage_fraction'], 0)
@@ -219,7 +220,10 @@ runpy.run_path('dense_partition.py', run_name='__main__')
             self.assertEqual(metadata['maximum_masks_per_pixel'], 1)
             self.assertEqual(metadata['raw_output']['kind'], 'slic_labels')
             raw = np.load(directory / 'raw_labels.npy', allow_pickle=False)
-            np.testing.assert_array_equal(connected_labels(raw), np.load(directory / 'labels.npy'))
+            final = np.load(directory / 'labels.npy')
+            self.assertEqual(raw.shape, final.shape)
+            self.assertLessEqual(int(final.max()), int(connected_labels(raw).max()))
+            self.assertGreaterEqual(metadata['minimum_area'], summary['config']['slic']['postprocess']['min_mask_area'])
             self.assertEqual(summary['images'][0]['results']['slic']['raw_output'], metadata['raw_output'])
             masks = np.stack([mask for _, mask in iter_masks(directory / 'masks.npz')])
             self.assertTrue(np.all(masks.sum(axis=0) == 1))

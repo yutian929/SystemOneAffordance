@@ -93,11 +93,12 @@ def default_arguments(function):
             if parameter.default is not Parameter.empty}
 
 
-def make_config(method, *, device, unsam, slic, semantic_sam):
+def make_config(method, *, device, unsam, slic, semantic_sam, min_mask_area):
     """Combine public controls with fixed settings and return an independent snapshot."""
     if method not in METHOD_NAMES:
         raise ValueError(f'Unknown method {method!r}; choose from {tuple(METHOD_NAMES)}')
-    settings = {'method': method, 'runtime': {**_RUNTIME, 'device': device}}
+    settings = {'method': method, 'runtime': {**_RUNTIME, 'device': device},
+                'postprocess': {'min_mask_area': min_mask_area}}
     if method == 'slic':
         settings['runtime'].update(device='cpu', precision='float32')
         settings['algorithm'] = {**_SLIC, **slic}
@@ -118,6 +119,9 @@ def make_config(method, *, device, unsam, slic, semantic_sam):
 def validate_config(settings, method):
     if settings.get('method') != method:
         raise ValueError('Configuration method does not match the implementation')
+    min_area = settings['postprocess']['min_mask_area']
+    if type(min_area) is not int or min_area < 0:
+        raise ValueError('min_mask_area must be a nonnegative integer')
     runtime = settings['runtime']
     if not isinstance(runtime['device'], str) or not re.fullmatch(r'cpu|cuda(?::\d+)?', runtime['device']):
         raise ValueError('device must be cpu, cuda, or cuda:<index>')
