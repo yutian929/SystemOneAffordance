@@ -2,8 +2,6 @@
 --extra-index-url https://download.pytorch.org/whl/cu124
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
-transformers==5.4.0
-av==16.1.0
 numpy==2.2.6
 scipy==1.15.3
 Pillow==12.1.1

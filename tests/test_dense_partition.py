@@ -7,9 +7,15 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dense_partition import (connected_labels, export_partition, iter_masks,
-                             merge_tiny_regions, refine_partition, resolve_masks,
-                             slic_partition, validate_partition)
+from dense_partition import DensePartition, SAM21Partition, UnSAMv2PlusPartition, SLICPartition
+from config import get_config
+from utils.io import export_partition, iter_masks
+from utils.partition import connected_labels, merge_tiny_regions, resolve_masks, validate_partition
+from unittest.mock import patch
+from PIL import Image
+import json
+import os
+import subprocess
 
 
 class DensePartitionTest(unittest.TestCase):
@@ -56,19 +62,12 @@ class DensePartitionTest(unittest.TestCase):
         one, _ = merge_tiny_regions(np.ones((1, 1), int), np.zeros((1, 1, 3), np.uint8), 16)
         self.assertEqual(validate_partition(one)['region_count'], 1)
 
-    def test_refinement_preserves_both_parent_partitions(self):
-        a = np.array([[1, 1, 2, 2], [1, 1, 2, 2], [1, 1, 2, 2]])
-        b = np.array([[1, 1, 1, 1], [2, 2, 2, 2], [2, 2, 2, 2]])
-        labels = refine_partition(a, b)
-        self.assertEqual(validate_partition(labels)['region_count'], 4)
-        for region in np.unique(labels):
-            self.assertEqual(len(np.unique(a[labels == region])), 1)
-            self.assertEqual(len(np.unique(b[labels == region])), 1)
-
     def test_packed_export_reconstructs_non_byte_aligned_width(self):
         rgb = np.zeros((12, 13, 3), np.uint8)
         rgb[:, 6:] = 255
-        labels = slic_partition(rgb, n_segments=8)
+        settings = get_config('slic')
+        settings['algorithm']['n_segments'] = 8
+        labels = DensePartition.create('slic', settings).segment(rgb).labels
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / 'partition'
             stats, regions = export_partition(directory, labels)
@@ -81,6 +80,124 @@ class DensePartitionTest(unittest.TestCase):
             self.assertTrue(stats['export_verified'])
             self.assertEqual(stats['minimum_masks_per_pixel'], 1)
             self.assertEqual(stats['maximum_masks_per_pixel'], 1)
+
+
+class CommonAPITest(unittest.TestCase):
+    def test_factory_and_independent_configuration(self):
+        for name, implementation in [('sam2', SAM21Partition), ('unsamv2-plus', UnSAMv2PlusPartition),
+                                     ('slic', SLICPartition)]:
+            self.assertIsInstance(DensePartition.create(name), implementation)
+        with self.assertRaises(TypeError):
+            DensePartition()
+        with self.assertRaises(ValueError):
+            DensePartition.create('missing')
+        settings = get_config('slic')
+        engine = DensePartition.create('slic', settings)
+        settings['algorithm']['n_segments'] = 1
+        exported = engine.config
+        exported['algorithm']['n_segments'] = 2
+        self.assertEqual(engine.config['algorithm']['n_segments'], 1200)
+
+    def test_invalid_config_is_rejected(self):
+        for method, section, key, value in [('slic', 'algorithm', 'n_segments', 0),
+                                           ('sam2', 'generator', 'points_per_batch', 0),
+                                           ('unsamv2-plus', 'model', 'granularity', float('nan'))]:
+            settings = get_config(method)
+            settings[section][key] = value
+            with self.assertRaises(ValueError):
+                DensePartition.create(method, settings)
+
+    def test_image_inputs_and_mask_contract(self):
+        rgb = np.random.default_rng(7).integers(0, 256, (20, 23, 3), dtype=np.uint8)
+        settings = get_config('slic')
+        settings['algorithm']['n_segments'] = 12
+        engine = DensePartition.create('slic', settings)
+        expected = engine.segment(rgb)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'image.png'
+            Image.fromarray(rgb).save(path)
+            for image in (path, str(path), Image.fromarray(rgb)):
+                np.testing.assert_array_equal(engine.segment(image).labels, expected.labels)
+        self.assertEqual(expected.masks.dtype, bool)
+        np.testing.assert_array_equal(expected.masks.sum(axis=0), np.ones(rgb.shape[:2]))
+        for region_id, mask in expected.iter_masks():
+            np.testing.assert_array_equal(mask, expected.labels == region_id)
+        with self.assertRaises(ValueError):
+            expected.mask(0)
+        with self.assertRaises(ValueError):
+            expected.labels[0, 0] = 0
+        for invalid in (np.zeros((3, 3, 3)), np.zeros((3, 3), np.uint8), np.zeros((0, 3, 3), np.uint8)):
+            with self.assertRaises(ValueError):
+                engine.segment(invalid)
+        with self.assertRaises(TypeError):
+            engine.segment(None)
+
+    def test_base_rejects_backend_contract_violations(self):
+        engine = DensePartition.create('slic')
+        rgb = np.zeros((2, 2, 3), np.uint8)
+        for invalid in (np.zeros((2, 2), int), np.ones((1, 2), int), np.array([[1, 2], [2, 1]])):
+            with patch.object(engine, '_segment_rgb', return_value=(invalid, None, {})):
+                with self.assertRaises(ValueError):
+                    engine.segment(rgb)
+
+    def test_both_models_resolve_overlaps_and_gaps(self):
+        rgb = np.zeros((8, 9, 3), np.uint8)
+        masks = np.zeros((2, 8, 9), bool)
+        masks[0, 1:7, 1:8] = True
+        masks[1, 3:5, 3:6] = True
+        records = [dict(predicted_iou=.99, stability_score=.99),
+                   dict(predicted_iou=.6, stability_score=.8)]
+        for method in ('sam2', 'unsamv2-plus'):
+            settings = get_config(method)
+            settings['partition']['minimum_model_region_area'] = 1
+            with patch('utils.models.generate_proposals', return_value=(masks, records, {})):
+                result = DensePartition.create(method, settings).segment(rgb)
+            self.assertEqual(result.owners[3, 4], 2)
+            self.assertEqual(result.owners[0, 0], 0)
+            self.assertEqual(result.metadata['raw_uncovered_pixels'], 30)
+            self.assertTrue(np.all(result.masks.sum(axis=0) == 1))
+            with patch('utils.models.generate_proposals', return_value=(np.zeros((0, 8, 9), bool), [], {})):
+                empty = DensePartition.create(method, settings).segment(rgb)
+            self.assertEqual(empty.region_count, 1)
+            self.assertEqual(empty.metadata['raw_coverage_fraction'], 0)
+
+    def test_slic_cli_exports_without_model_imports(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            path, output = temporary / 'input.png', temporary / 'results'
+            Image.fromarray(np.zeros((20, 23, 3), np.uint8)).save(path)
+            # Deny these imports, rather than merely hoping weights are not loaded.
+            code = '''
+import builtins, runpy, sys
+original_import = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name.split('.')[0] in ('torch', 'sam2', 'transformers', 'av'):
+        raise AssertionError('Unexpected model import: ' + name)
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded
+sys.argv = ['dense_partition.py', '--image', sys.argv[1], '--method', 'slic', '--output', sys.argv[2]]
+runpy.run_path('dense_partition.py', run_name='__main__')
+'''
+            env = os.environ.copy()
+            env.pop('PYTHONPATH', None)
+            process = subprocess.run([sys.executable, '-B', '-c', code, str(path), str(output)],
+                                     cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            summary = json.loads((output / 'summary.json').read_text())
+            self.assertTrue(summary['completed'])
+            self.assertEqual(len(summary['images']), 1)
+            directory = output / summary['images'][0]['results']['slic']['directory']
+            metadata = json.loads((directory / 'metadata.json').read_text())
+            self.assertTrue(metadata['export_verified'])
+            self.assertEqual(metadata['minimum_masks_per_pixel'], 1)
+            self.assertEqual(metadata['maximum_masks_per_pixel'], 1)
+            masks = np.stack([mask for _, mask in iter_masks(directory / 'masks.npz')])
+            self.assertTrue(np.all(masks.sum(axis=0) == 1))
+            self.assertTrue((output / 'index.html').is_file())
+            with self.assertRaises(FileExistsError):
+                DensePartition.create('slic').segment(path).save(directory)
+
 
 
 if __name__ == '__main__':

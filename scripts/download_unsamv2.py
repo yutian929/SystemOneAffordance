@@ -1,7 +1,5 @@
 """Download the official UnSAMv2+ checkpoint and pin its inference code outside the repo."""
 import argparse
-import hashlib
-import json
 import os
 from pathlib import Path
 import ssl
@@ -11,22 +9,19 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from unsamv2_backend import (CHECKPOINT_NAME, CHECKPOINT_SHA256, CHECKPOINT_URL,
-                            CODE_REVISION, CODE_URL, default_code_dir, validate_source)
+from config import (UNSAMV2_PLUS, UNSAM_CHECKPOINT_SHA256 as CHECKPOINT_SHA256,
+                    UNSAM_CHECKPOINT_URL as CHECKPOINT_URL,
+                    UNSAM_CODE_REVISION as CODE_REVISION, UNSAM_CODE_URL as CODE_URL)
+from utils.io import file_digest, write_json
+from utils.models import validate_source
 
-
-def sha256(path):
-    digest = hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda: stream.read(8 * 1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
+CHECKPOINT_NAME = UNSAMV2_PLUS['checkpoint_name']
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, default=ROOT / 'models/UnSAMv2-plus')
-    parser.add_argument('--code-dir', type=Path, default=default_code_dir())
+    parser.add_argument('--output', type=Path, default=UNSAMV2_PLUS['checkpoint_dir'])
+    parser.add_argument('--code-dir', type=Path, default=UNSAMV2_PLUS['code_dir'])
     args = parser.parse_args()
     code = args.code_dir.expanduser().resolve()
     env = os.environ.copy()
@@ -54,10 +49,10 @@ def main():
             with partial.open('wb') as stream:
                 while block := response.read(8 * 1024 * 1024):
                     stream.write(block)
-        if sha256(partial) != CHECKPOINT_SHA256:
+        if file_digest(partial) != CHECKPOINT_SHA256:
             raise RuntimeError(f'Checkpoint checksum mismatch: {partial}')
         partial.replace(checkpoint)
-    if sha256(checkpoint) != CHECKPOINT_SHA256:
+    if file_digest(checkpoint) != CHECKPOINT_SHA256:
         raise RuntimeError(f'Checkpoint checksum mismatch: {checkpoint}')
     source = dict(repo_id='yujunwei04/UnSAMv2', variant='UnSAMv2+', revision=CHECKPOINT_SHA256,
                   url=CHECKPOINT_URL, code_repository=CODE_URL, code_revision=CODE_REVISION,
@@ -65,7 +60,7 @@ def main():
                               sha256=CHECKPOINT_SHA256)])
     for name, content in [('source.json', source), ('verified.json', dict(
             revision=CHECKPOINT_SHA256, all_files_present=True, sha256_verified=True))]:
-        (destination / name).write_text(json.dumps(content, indent=2) + '\n')
+        write_json(destination / name, content)
     print(f'Checkpoint verified: {checkpoint}\nInference code: {code}', flush=True)
 
 

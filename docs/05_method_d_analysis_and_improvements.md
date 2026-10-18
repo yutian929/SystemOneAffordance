@@ -4,28 +4,16 @@
 
 本文详细记录方法 D 的第一版实现，并作为后续讨论、对照实验和改进的记录入口。总体实验方案见 [04 最小 Affordance 决策测试](04_minimal_affordance_test.md)。
 
-**当前状态：D 初版已完成 5 张图、6 条调试任务的端到端运行；已补做固定点标签的 SAM 对照实验；代码已重构为仓库根目录的 `MethodD` 主类，使用独立 Miniconda 环境，并新增可选 UnSAMv2+ 候选生成。** 点判断与最终分割仍使用“连通域内部中心点 → Noul 阈值 0.5 → 每个前景点配合全部背景点 → SAM 单 mask 输出 → 取并集”。
+**当前状态（2026-10-18）：只保留 Dense Partition 分割阶段。** 根目录主接口为 `dense_partition.py`，统一支持 SAM 2.1、UnSAMv2+、SLIC；参数和 debug 图片列表集中在 `config.py`。完整 D、Valen 判断、取点与任务评估代码、旧 `configs/` 均已删除，当前结构与接口见第 13 节及 [README](../README.md)。
 
-后续实验：已增加可选的 **UnSAMv2+ 全图候选生成**，支持连续粒度参数和不限制候选数量。初版 SAM 2 路径仍可复现；新的模型接入范围、参数和实验结果统一记录在第 11 节。
+**第 1～12 节保留历史流程、实验数据与研究讨论。** 其中旧文件、命令、配置均对应重构前提交 `3d62972`，不再是当前代码的使用方式；请在独立历史 checkout 中复现旧实验。最初原型对应 `3d57ce5`。历史结果仍有研究价值，保留不代表当前继续运行完整 D。
 
-**当前实验重点已收敛到第一阶段：全覆盖、互不重叠的 Dense Partition 候选。** 第 12 节记录 SAM 2.1、UnSAMv2+ 和传统图像处理方法的比较。该实验独立于原 D 的取点和判断流程，暂不进行 affordance 决策。
-
-2026-10-17 的结构调整把自动候选生成纳入 D，自行读取样本清单；旧 A/D 候选缓存作为可选输入。本文的算法步骤保持初版定义，代码入口和复现方式已更新。原始脚本可在 Git 提交 `3d57ce5` 中查看。
-
-本文分清三类内容：初版流程描述现有代码；结果与对照描述已经运行的实验；改进部分是待验证的假设，不代表当前实现已经改变。
-
-| 入口 | 作用 |
+| 当前入口 | 作用 |
 | --- | --- |
-| [method_d.py](../method_d.py) | D 主类、候选生成、模型调用、保存与评估 |
-| [run_method_d.py](../run_method_d.py) | D 的命令行入口 |
-| [method_d_utils.py](../method_d_utils.py) | 连通域中心点、标记图、SAM 点提示、点级评估 |
-| [mask_utils.py](../mask_utils.py) | 候选过滤、Noul 解析、mask 合并与像素评估 |
-| [experiment_utils.py](../experiment_utils.py) | 清单校验、文件、模型元数据和可视化工具 |
-| [environment.yml](../environment.yml) | 独立 Miniconda 环境定义 |
-| [unsamv2_backend.py](../unsamv2_backend.py) | 固定版本 UnSAMv2+ 的全图候选适配 |
-| [compare_candidates.py](../compare_candidates.py) | 候选与采样点对照、离线覆盖诊断及可视化 |
-| [umd_debug.json](../configs/umd_debug.json) | 最初的调试样本清单 |
-| [D 初版运行配置](../outputs/method_d_debug/run.json) | 初版实验的模型 revision、设备、精度与参数 |
+| [dense_partition.py](../dense_partition.py) | 基类、三种算法实现、统一工厂 |
+| [config.py](../config.py) | 参数、模型资源与 debug 图片 |
+| [utils](../utils/) | 通用分区转换、验证、导出、推理和可视化 |
+| [environment.yml](../environment.yml) | Miniconda 环境定义 |
 
 ## 1. 初版要解决什么问题
 
@@ -839,7 +827,7 @@ slic_zero = False；start_label = 1
 
 ### 12.4 从原始候选到严格分区
 
-实现见 [dense_partition.py](../dense_partition.py)，批量入口为 [run_dense_partition.py](../run_dense_partition.py)。
+实现见 [dense_partition.py](../dense_partition.py)，批量入口为 `run_dense_partition.py`（历史文件）。
 
 1. **候选生成。** 输出 `masks[N,H,W]` 和 N 条质量、稳定性等记录。保存原始覆盖计数，统计未覆盖像素与重叠像素，不读取标签或任务文本。
 2. **重叠归属。** 按候选面积从小到大分配像素，优先保留细小部件。面积相同时按质量分、稳定性分从高到低，再按原始索引排序。每个像素只授予第一个覆盖它的候选。
@@ -953,3 +941,103 @@ for region_id, mask in iter_masks("<某个分区目录>/masks.npz"):
 5 图累计候选推理时间约为 SAM 2.1 **105.57 秒**、UnSAMv2+ **75.20 秒**；SLIC 600 档约 **1.11 秒**。模型数字不含加载、分区转换、压缩导出及可视化，SLIC 数字为分区生成时间；模型使用共享 GPU，SLIC 使用 CPU，硬件和计时边界不同，只用于估计本次运行成本，不能视为严格速度基准。
 
 本轮没有完整场景的像素分区真值评价，不提供误导性的“分割准确率”，也没有继续运行 D 的后续判断阶段。下一步应先根据这些可点击 Mask 确认所需区域尺度，再决定保留纯 SLIC，还是研究能保留模型部件边界且减少碎片的融合方式。
+
+## 13. Dense Partition 独立重构（2026-10-18）
+
+### 13.1 当前边界与代码组织
+
+当前先把分割候选做好：**输入 RGB 图像，输出 Exhaustive Segmentation / Dense Partition**。原完整 D、Valen 判断、中心取点、任务指令、GT 评估和旧运行入口均移除。`configs/` 也已删除，5 张 debug 图片直接列在 `config.py`。第 1～12 节中的旧代码与实验可从提交 `3d62972` 找回。
+
+根目录只有两个 Python 文件：
+
+- `dense_partition.py`：抽象基类 `DensePartition`、`SAM21Partition`、`UnSAMv2PlusPartition`、`SLICPartition` 和统一工厂。
+- `config.py`：模型路径、下载版本、运行设备、生成器参数、SLIC 参数、分区后处理参数和 debug 图片列表。
+
+`utils/` 保存通用图像读取、分区转换与验证、结果类型、Mask 导出、模型进程适配和可视化。`scripts/` 只有 SAM 2.1 和 UnSAMv2+ 两个模型下载脚本。
+
+### 13.2 统一契约与中间变量
+
+```python
+from dense_partition import DensePartition
+
+engine = DensePartition.create("unsamv2-plus")
+result = engine.segment(image)
+```
+
+| 变量 | 类型 / 形状 | 含义 |
+| --- | --- | --- |
+| `image` | 路径、PIL 图像或 `uint8[H,W,3]` | 输入图片，数组必须为 RGB |
+| `rgb` | `uint8[H,W,3]` | 统一读取后的原分辨率 RGB 副本 |
+| `settings` | `dict` | 从 `config.py` 复制的实例配置，实例间互不影响 |
+| `masks`（模型内部） | `bool[N,H,W]` | 原始模型候选，可能重叠、漏覆盖、包含多个连通块 |
+| `records`（模型内部） | 长度 N 的列表 | 每个候选的质量和稳定性等信息，用于重叠优先级 |
+| `owners` | `uint32[H,W]` 或 `None` | 小区域优先后每个像素所属的原始候选索引 + 1；0 表示原模型未覆盖；SLIC 为 `None` |
+| `labels` | `uint32[H,W]` | 最终分区 ID，连续取值 1…K，0 不表示背景，也不会出现在最终输出中 |
+| `result` | `PartitionResult` | `labels`、`rgb`、`owners`、元数据，以及 Mask 访问与保存接口 |
+| `result.mask(i)` | `bool[H,W]` | 第 i 个最终 Mask，等价于 `labels == i` |
+| `result.masks` | `bool[K,H,W]` | 按需创建的完整 Mask 集合；大图优先使用 `iter_masks()` |
+
+`owners` 是合并前的候选来源记录。合并后某个最终 Mask 可能包含多个来源以及模型未覆盖像素，因此不能把 `owners` 当作最终 Mask 编号。
+
+基类 `segment()` 在返回前统一检查：原分辨率、正整数连续编号、每个 Mask 为 4 连通区域。唯一标签表示从结构上保证每个像素恰好属于一个区域。保存时再次从压缩文件解码全部二值 Mask，独立验证：
+
+\[
+\forall (x,y),\quad \sum_{i=1}^{K}\mathbf{1}[M_i(y,x)] = 1.
+\]
+
+空候选也能输出一个覆盖整幅图像的 Mask，同时明确记录原模型覆盖率为 0。输出结构有效不等于模型分割质量良好。
+
+### 13.3 处理流程
+
+```mermaid
+flowchart TD
+    I[图片路径 / PIL / RGB 数组] --> R[统一读取 uint8 RGB，保持原分辨率]
+    C[config.py：实例配置副本] --> F[DensePartition.create 选择实现]
+    R --> F
+    F --> S[SAM21Partition]
+    F --> U[UnSAMv2PlusPartition]
+    F --> L[SLICPartition]
+    S --> SW[独立进程：SAM 2.1 自动候选]
+    U --> UW[独立进程：UnSAMv2+ 自动候选，gra 控制粒度]
+    SW --> P[原始 masks + records]
+    UW --> P
+    P --> O[小区域优先；质量、稳定性与索引打破平局]
+    O --> A[每像素确定唯一原始候选来源 owners]
+    A --> B[所有值拆成 4 连通区域，包括原模型未覆盖区]
+    B --> M[合并小于配置面积的相邻微小区域]
+    M --> V[基类检查：正整数连续标签、原分辨率、4 连通]
+    L --> SL[SLIC 超像素 + 4 连通区域重编号]
+    SL --> V
+    V --> RES[PartitionResult：labels / mask / metadata]
+    RES --> E[可选保存：无损标签、位压缩 Mask、边界图]
+    E --> Q[重新读取二值 Mask：逐像素求和必须等于 1]
+```
+
+两个模型默认使用相同生成参数：96×96 点网格、batch 64、IoU 阈值 0.5、稳定性阈值 0.8。UnSAMv2+ 默认 `granularity=0.15`；粒度传给官方实现的 `generate(..., gra=...)`。模型分区默认合并小于 16 像素的区域，合并目标限定为相邻且平均 Lab 颜色最接近的区域。若要保留所有细碎分区，将 `minimum_model_region_area` 设为 1。
+
+SLIC 默认目标 1200 个区域，`compactness=5`、`sigma=0.5`。实际区域数受连通性和图像内容影响。当前三种方法各自独立输出，不再保留模型与 SLIC 直接求交的组合入口。
+
+SAM 与 UnSAM 的 Python 包都叫 `sam2`，因此二者均在独立子进程中加载和推理；每张图结束即退出进程，释放 GPU 内存。代价是每张图重新加载模型。父进程做通用转换和导出；SLIC 全程 CPU 且不导入 PyTorch。所有运行参数保存在输出元数据中。
+
+### 13.4 当前使用方式
+
+```bash
+# 激活已有 Miniconda 环境后，使用尚不存在的输出目录
+python dense_partition.py --debug --method sam2 unsamv2-plus slic \
+  --output outputs/partition_comparison
+
+python -m unittest discover -s tests -v
+```
+
+详见 [README](../README.md) 中的环境配置、参数表和 Python API。模型配置字段中的 `configs/…yaml` 是第三方包内部的资源名称，与已删除的仓库 `configs/` 目录无关。
+
+### 13.5 本次重构验证
+
+2026-10-18 在现有 Miniconda 环境中通过 11 项单元测试和 `pip check`，并使用真实模型重新处理全部 5 张 debug 图片，共生成 15 份分区。对照第 12 节的模型 `native` 与 SLIC `s1200`，**15 份 `labels.npy` 均逐像素完全一致**，本次调整未改变对应参数下的分割结果。
+
+所有导出的二值 Mask 均重新读取并通过检查：每像素 Mask 数的最小值和最大值都为 1，全部 Mask 为 4 连通。浏览器实际验证了 5 张图的切换、三方法 Mask 选择和高亮；下载的 UnSAMv2+ 二值 PNG 与对应 `labels == id` 逐像素一致，无浏览器运行错误。
+
+- [重构后的三方法交互页面](../outputs/dense_partition_refactored/index.html) / [并排总览](../outputs/dense_partition_refactored/overview.jpg)。
+- [运行参数和统计](../outputs/dense_partition_refactored/summary.json) / [逐像素回归记录](../outputs/dense_partition_refactored/regression_check.json) / [浏览器验证](../outputs/dense_partition_refactored/browser_check.json)。
+
+这些结果是本地产物，不纳入 Git；重新运行时使用新输出目录。当前只验证了分区契约与重构一致性，没有恢复后续 Affordance 决策流程。
