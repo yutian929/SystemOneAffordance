@@ -277,4 +277,4 @@ python -m unittest discover -s tests -v
 
 本次五图在 RTX 4090 D、`cuda:1` 上运行，默认短边 1024、FP32；模型推理及候选尺寸还原约 1.35–2.33 秒/图，worker 总耗时约 5.59–9.18 秒/图，峰值 CUDA 张量分配约 10.78 GiB。该内存统计不包含其他进程或 CUDA 保留内存，实际耗时会随图像和设备负载变化。可视化中工具的部分局部区域被分开，背景细分也较多；尚未进行带匿名部件标注的准确率评测，候选数或覆盖率不能证明优于其他方法。
 
-研究资料见 [文档导航](docs/README.md)；历史方法 D、三方法分割对照和本次重构架构见 [文档 05](docs/05_method_d_analysis_and_improvements.md)。
+研究资料见 [文档导航](docs/README.md)。历史 A、C、D 实验方案见 [最小 Affordance 决策测试](docs/04_minimal_affordance_test.md)；任务范式、数据集与后续研究方向见 [2D Affordance 深度调研](docs/00_SystemOne_2DAffordance_深度调研.md)；六种分割方法的评测计划见 [UMD 分割评价方案](docs/06_umd_affordance_partition_benchmark.md)。当前实现的架构、用法与验证记录以本 README 为准。
