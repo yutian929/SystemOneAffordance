@@ -9,7 +9,8 @@ from scipy.ndimage import binary_dilation, binary_erosion
 def select_candidates(proposals, maximum=24, duplicate_iou=0.90):
     """Quality-ranked mask NMS, then retain candidates across four area ranks.
 
-    No labels, instructions, semantic classes, or minimum area enter this step.
+    maximum=None keeps all nonduplicate masks. No labels, instructions, semantic
+    classes, or minimum area enter this step.
     """
     ranked = sorted(enumerate(proposals), key=lambda item: (
         -float(item[1]['predicted_iou']), -float(item[1]['stability_score']), item[0]))
@@ -29,7 +30,7 @@ def select_candidates(proposals, maximum=24, duplicate_iou=0.90):
         if not duplicate:
             unique.append((original_index, candidate))
     unique_count = len(unique)
-    if unique_count > maximum:
+    if maximum is not None and unique_count > maximum:
         # Rank quartiles (equal candidate counts), not equal-width pixel bins.
         by_area = sorted(range(unique_count), key=lambda i: unique[i][1]['area'])
         buckets = [sorted(map(int, b)) for b in np.array_split(by_area, 4)]

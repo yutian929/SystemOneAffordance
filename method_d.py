@@ -1,4 +1,4 @@
-"""Standalone method D: SAM candidates -> component centers -> Valen -> SAM union.
+"""Method D: SAM 2 / UnSAMv2+ candidates -> component centers -> Valen -> SAM union.
 
 Use MethodD.predict(image, instruction) for inference without ground truth, or
 MethodD.run_manifest(path) for saved experiments with optional offline evaluation.
@@ -82,9 +82,27 @@ class MethodD:
     """
 
     def __init__(self, *, device='cuda:1', threshold=0.5, output_dir=None,
-                 candidate_cache=None, sam_dir=None, valen_dir=None):
+                 candidate_cache=None, sam_dir=None, valen_dir=None,
+                 candidate_model='sam2', granularity=0.15, max_candidates=24,
+                 unsam_dir=None, unsam_code_dir=None, generator_config=None):
         if not np.isfinite(threshold) or not 0 <= threshold <= 1:
             raise ValueError('threshold must be finite and in [0, 1]')
+        if candidate_model not in ('sam2', 'unsamv2-plus'):
+            raise ValueError('candidate_model must be sam2 or unsamv2-plus')
+        if not np.isfinite(granularity) or not 0.1 <= granularity <= 1:
+            raise ValueError('granularity must be finite and in [0.1, 1]')
+        if max_candidates is not None and (not isinstance(max_candidates, int) or max_candidates < 0):
+            raise ValueError('max_candidates must be a nonnegative integer or None')
+        from unsamv2_backend import (CODE_REVISION, GENERATOR as UNSAM_GENERATOR,
+                                     MODEL_CONFIG, default_code_dir)
+        self.candidate_model = candidate_model
+        self.granularity = float(granularity) if candidate_model == 'unsamv2-plus' else None
+        self.generator_config = dict(UNSAM_GENERATOR if self.granularity is not None else GENERATOR)
+        if generator_config:
+            self.generator_config.update(generator_config)
+        self.filter_config = {**FILTER, 'maximum': max_candidates or None}
+        self.unsam_dir = resolve(unsam_dir or 'models/UnSAMv2-plus').resolve()
+        self.unsam_code_dir = Path(unsam_code_dir or default_code_dir()).expanduser().resolve()
         self.device = str(torch.device(device))
         self.threshold = float(threshold)
         self.sam_dir = resolve(sam_dir or 'models/SAM2.1-small').resolve()
@@ -107,7 +125,12 @@ class MethodD:
         self.config = {
             'method': 'D', 'implementation': 'MethodD', 'device': self.device, 'threshold': self.threshold,
             'candidate_cache': str(self.candidate_cache) if self.candidate_cache else None,
-            'sam_config': SAM_CONFIG, 'generator': dict(GENERATOR), 'filter': dict(FILTER),
+            'sam_config': SAM_CONFIG, 'generator': self.generator_config, 'filter': self.filter_config,
+            'candidate_model': candidate_model, 'candidate_granularity': self.granularity,
+            'candidate_config': MODEL_CONFIG if self.granularity is not None else SAM_CONFIG,
+            'candidate_code_revision': CODE_REVISION if self.granularity is not None else None,
+            'candidate_code_dir': str(self.unsam_code_dir) if self.granularity is not None else None,
+            'final_segmenter': 'sam2.1-small',
             'prompt': PROMPT, 'question': QUESTION, 'connectivity': 8,
             'center_rule': 'nearest internal pixel to arithmetic centroid; ties by row, column',
             'deduplication': 'identical integer (x,y) only; keep all sources',
@@ -212,29 +235,50 @@ class MethodD:
         generation = source.get('source_a_config', source)
         if generation.get('prepared') is not True:
             raise ValueError('Cached candidate preparation did not finish')
-        sam_info = checkpoint_info(self.sam_dir)
-        if generation['sam']['revision'] != sam_info['revision']:
-            raise ValueError('Cached SAM revision differs from the current checkpoint')
-        if (generation['sam_config'] != SAM_CONFIG or generation['generator'] != GENERATOR
-                or generation['filter'] != FILTER):
+        if generation.get('candidate_model', 'sam2') != self.candidate_model:
+            raise ValueError('Cached candidate model differs from MethodD')
+        info = checkpoint_info(self.unsam_dir if self.granularity is not None else self.sam_dir)
+        recorded = generation.get('candidate_checkpoint') or generation['sam']
+        if recorded['revision'] != info['revision']:
+            raise ValueError('Cached candidate checkpoint revision differs')
+        if (generation.get('candidate_config', generation['sam_config']) != self.config['candidate_config']
+                or generation['generator'] != self.generator_config
+                or generation['filter'] != self.filter_config
+                or generation.get('candidate_granularity') != self.granularity
+                or generation.get('candidate_code_revision') != self.config['candidate_code_revision']):
             raise ValueError('Cached candidate configuration differs from MethodD')
-        self.config['sam'] = sam_info
+        self.config['candidate_checkpoint'] = info
+        if self.candidate_model == 'sam2':
+            self.config['sam'] = info
         self.config['candidate_cache_config'] = generation
         self._cache_checked = True
 
     def _generate_candidates(self, rgb, image, sha, directory):
-        from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-        self._load_sam(rgb)
-        if self._generator is None:
-            self._generator = SAM2AutomaticMaskGenerator(self._sam, **GENERATOR)
-        self._synchronize()
+        backend_timing = None
+        if self.candidate_model == 'unsamv2-plus':
+            from unsamv2_backend import CHECKPOINT_SHA256, generate_candidates
+            self._record_runtime()
+            self.config['candidate_checkpoint'] = checkpoint_info(self.unsam_dir)
+            if self.config['candidate_checkpoint']['revision'] != CHECKPOINT_SHA256:
+                raise ValueError('UnSAMv2+ checkpoint does not match the pinned official release')
+            proposals, backend_timing = generate_candidates(
+                image, self.unsam_dir, self.unsam_code_dir, self.device, self.granularity,
+                self.generator_config, directory / 'backend.log')
+            generate_seconds = backend_timing['generate_seconds']
+        else:
+            from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+            self._load_sam(rgb)
+            self.config['candidate_checkpoint'] = self.config['sam']
+            if self._generator is None:
+                self._generator = SAM2AutomaticMaskGenerator(self._sam, **self.generator_config)
+            self._synchronize()
+            start = time.perf_counter()
+            with torch.inference_mode(), self._autocast():
+                proposals = self._generator.generate(rgb)
+            self._synchronize()
+            generate_seconds = time.perf_counter() - start
         start = time.perf_counter()
-        with torch.inference_mode(), self._autocast():
-            proposals = self._generator.generate(rgb)
-        self._synchronize()
-        generate_seconds = time.perf_counter() - start
-        start = time.perf_counter()
-        candidates, counts = select_candidates(proposals, **FILTER)
+        candidates, counts = select_candidates(proposals, **self.filter_config)
         masks = np.stack([c['segmentation'] for _, c in candidates]) if candidates else np.zeros(
             (0, *rgb.shape[:2]), dtype=bool)
         filter_seconds = time.perf_counter() - start
@@ -255,6 +299,8 @@ class MethodD:
         metadata = {'image': str(image), 'image_sha256': sha, 'shape': list(rgb.shape[:2]),
                     **counts, 'candidates': details, 'generate_seconds': generate_seconds,
                     'filter_seconds': filter_seconds,
+                    'candidate_model': self.candidate_model, 'granularity': self.granularity,
+                    'backend_timing': backend_timing,
                     'render_and_save_seconds': time.perf_counter() - start}
         write_json(directory / 'metadata.json', metadata)
         return masks, metadata
@@ -393,6 +439,7 @@ class MethodD:
                       directory / 'comparison.png', columns=2, cell_width=640)
         count = len(masks)
         summary = {'id': sample_id, 'image': str(prepared.image), 'instruction': instruction,
+                   'candidate_model': self.candidate_model, 'granularity': self.granularity,
                    'candidate_key': prepared.key, 'candidate_count': len(prepared.candidates),
                    'point_count': len(prepared.points),
                    'component_count': prepared.point_metadata['component_count'],
@@ -439,8 +486,8 @@ class MethodD:
         result.summary['output_and_evaluation_seconds'] += time.perf_counter() - start
         write_json(result.directory / 'scores.json', {**result.summary, 'records': result.records})
 
-    def run_manifest(self, manifest='configs/umd_debug.json'):
-        """Run a validated task manifest; optional GT remains in offline evaluation."""
+    def prepare_manifest(self, manifest='configs/umd_debug.json'):
+        """Prepare whole-image candidates and points without running Valen or reading GT."""
         self._check_open()
         if (self.output_dir / 'manifest.json').exists():
             raise FileExistsError('This instance already started a manifest run; use a new output directory')
@@ -450,6 +497,11 @@ class MethodD:
             self.prepare_image(row['image'])
         self.config['prepared'] = True
         self._save_config()
+        return manifest
+
+    def run_manifest(self, manifest='configs/umd_debug.json'):
+        """Run a validated task manifest; optional GT remains in offline evaluation."""
+        manifest = self.prepare_manifest(manifest)
         summaries, comparisons = [], []
         for row in manifest['samples']:
             result = self.predict(row['image'], row['instruction'], sample_id=row['id'])
@@ -468,7 +520,8 @@ class MethodD:
                   'unique_images': len(self._prepared),
                   'timing_note': 'Per-image preparation timings repeat for shared images; count each candidate key once. '
                                  'generate_seconds is zero for imported candidates; source_generate_seconds records '
-                                 'their original cost. Loading/warmups are separate in run.json.'}
+                                 'their original cost. Baseline loading/warmups are in run.json; UnSAM worker load '
+                                 'and wall times are in each candidate metadata.json backend_timing.'}
         fields = ['id', 'candidate_count', 'point_count', 'accepted_count', 'iou', 'precision', 'recall',
                   'point_tp', 'point_fp', 'point_tn', 'point_fn', 'gt_component_count',
                   'gt_components_hit_by_points', 'gt_components_hit_by_accepted_points',

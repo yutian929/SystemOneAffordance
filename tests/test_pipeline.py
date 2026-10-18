@@ -164,6 +164,40 @@ class PipelineTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'closed'):
             pipeline.predict(self.image, 'anything')
 
+    def test_prepare_only_does_not_load_decision_or_final_segmenter(self):
+        pipeline = self.pipeline()
+        manifest = self.root / 'manifest.json'
+        write_json(manifest, {'samples': [dict(id='prepare', image=str(self.image), instruction='test')]})
+        with patch.object(pipeline, '_load_sam', side_effect=AssertionError('No final SAM needed')):
+            with patch.object(pipeline, '_load_valen', side_effect=AssertionError('No Valen needed')):
+                pipeline.prepare_manifest(manifest)
+        config = json.loads((pipeline.output_dir / 'run.json').read_text())
+        self.assertTrue(config['prepared'])
+        self.assertFalse(config['completed'])
+        self.assertFalse((pipeline.output_dir / 'samples').exists())
+
+    def test_candidate_cache_validates_model_granularity_and_budget(self):
+        from unsamv2_backend import CODE_REVISION, GENERATOR as UNSAM_GENERATOR, MODEL_CONFIG
+        with self.assertRaisesRegex(ValueError, 'model'):
+            self.pipeline(name='wrong_model', candidate_model='unsamv2-plus').prepare_image(self.image)
+        source = json.loads((self.cache / 'run.json').read_text())
+        source.update(method='D', candidate_model='unsamv2-plus', candidate_granularity=0.15,
+                      candidate_code_revision=CODE_REVISION, candidate_config=MODEL_CONFIG,
+                      candidate_checkpoint={'revision': 'fixture'}, generator=UNSAM_GENERATOR)
+        write_json(self.cache / 'run.json', source)
+        prepared = self.pipeline(name='compatible', candidate_model='unsamv2-plus').prepare_image(self.image)
+        self.assertEqual(len(prepared.points), 2)
+        for name, parameters in [('granularity', {'granularity': 0.3}), ('budget', {'max_candidates': 0})]:
+            with self.assertRaisesRegex(ValueError, 'configuration'):
+                self.pipeline(name=name, candidate_model='unsamv2-plus', **parameters).prepare_image(self.image)
+
+    def test_invalid_granularity_and_candidate_budget(self):
+        for value in (float('nan'), 0.05, 1.1):
+            with self.assertRaisesRegex(ValueError, 'granularity'):
+                self.pipeline(granularity=value)
+        with self.assertRaisesRegex(ValueError, 'max_candidates'):
+            self.pipeline(max_candidates=-1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -16,7 +16,7 @@
 | Python | 3.10 |
 | PyTorch / torchvision | `2.6.0+cu124` / `0.21.0+cu124` |
 | Transformers | `5.4.0` |
-| 模型 | SAM 2.1 small、Valen-4B |
+| 模型 | SAM 2.1 small、Valen-4B；可选 UnSAMv2+ 全图候选 |
 
 ### 日常使用：激活已有环境
 
@@ -116,6 +116,63 @@ python run_method_d.py \
 
 运行结果写入指定输出目录：`summary.json` / `summary.csv` 为汇总，`overview.jpg` 为总览，`samples/<任务ID>/prediction.png` 为最终 mask，`run.json` 记录环境及参数。数据、模型和实验输出均由 `.gitignore` 排除。
 
+### UnSAMv2+：可调粒度的全图候选
+
+激活同一 Conda 环境后，安装新增依赖并下载官方权重及固定版本的推理代码：
+
+```bash
+python -m pip install opencv-python-headless==4.11.0.86
+python scripts/download_unsamv2.py
+```
+
+权重保存到 `models/UnSAMv2-plus/`；官方推理源码保存到仓库外的 `~/.cache/systemone-affordance/UnSAMv2-f4ec1136/`，可通过 `UNSAMV2_CODE_DIR` 调整。官方 fork 也使用 `sam2` 包名，因此候选生成在独立子进程中执行，原 SAM 2 安装继续供 D 的最终点提示分割使用。
+
+只查看全分割候选和中心点：
+
+```bash
+python run_method_d.py \
+  --stage prepare \
+  --candidate-model unsamv2-plus \
+  --granularity 0.15 \
+  --max-candidates 0 \
+  --manifest configs/umd_debug.json \
+  --output outputs/unsamv2_prepare \
+  --device cuda:1
+```
+
+`--granularity` 范围为 `[0.1, 1.0]`，越小越细；`--max-candidates 0` 保留去重后的全部候选。默认上限仍为 24，细粒度探索时建议显式设置为 0。`--stage prepare` 生成候选和点图，跳过 Valen 及任务分割。该阶段的 `run.json` 中 `prepared=true`、`completed=false`，表示候选准备完成，完整任务预测尚未执行。
+
+改为 `--stage run` 并选择新输出目录，即可运行完整 D；若要复用上面的候选，增加 `--candidate-cache outputs/unsamv2_prepare`，候选模型、粒度和数量上限需与缓存一致。当前 UnSAMv2+ 接入的是**候选生成阶段**，最终点提示分割仍使用 SAM 2.1 small。
+
+比较已有运行的全图候选、取点和离线覆盖指标：
+
+```bash
+python compare_candidates.py \
+  --runs sam2=outputs/method_d_run unsam015=outputs/unsamv2_prepare \
+  --output outputs/candidate_comparison
+```
+
+打开比较目录中的 `index.html` 可切换方案、显示采样点；`overview.jpg` 是总览，`comparison.csv` / `comparison.json` 记录配置和指标。两组输入目录都必须已经完成同一份清单的候选准备。实验设计与结果见 [文档 05](docs/05_method_d_analysis_and_improvements.md)。
+
+### Dense Partition：每个像素恰好属于一个 Mask
+
+这一入口只比较候选分割，不运行 Valen 或后续点提示分割，也不读取 GT。对 debug 的 5 张不同图像分别生成 SAM 2.1、UnSAMv2+ 和传统 SLIC 超像素结果：
+
+```bash
+python -m pip install scikit-image==0.25.2
+python run_dense_partition.py --device cuda:1 \
+  --granularity 0.15 --segments 600 1200 \
+  --output outputs/dense_partition_new
+```
+
+两个模型的原始候选会经过统一的重叠归属、连通空白区补齐和微小区域合并，得到互斥分区；另外与同一份 SLIC 分区取交集，进一步细分大区域。这两档细分明确属于 **模型 + SLIC** 组合，页面默认展示没有 SLIC 细分的模型分区。SLIC 本身直接生成全覆盖分区。
+
+打开输出目录的 `index.html`，可以切换每张图、细分档位和显示方式，点击像素查看三个方法对应的 Mask，并下载选中的二值 Mask。`overview_native.jpg`、`overview_s600.jpg`、`overview_s1200.jpg` 为全部图像的并排总览。粉色视图展示原模型未覆盖的像素。
+
+`partitions/<图像哈希>/<方法>/<档位>/labels.npy` 是完整像素标签图，`labels == region_id` 即一个 Mask；`masks.npz` 保存无损位压缩的二值 Mask 集合，可用 `dense_partition.iter_masks(path)` 逐个读取。全部导出会重新读入验证：每个像素的 Mask 数严格为 1，且每个 Mask 为 4 连通。具体参数、选型依据和结果见 [文档 05 第 12 节](docs/05_method_d_analysis_and_improvements.md#12-dense-partition全覆盖互斥的细粒度候选)。
+
+调整 SLIC 密度时，可加 `--proposal-cache outputs/dense_partition_new` 复用同参数模型候选，输出仍需选择新目录。
+
 ## Python 主类
 
 主类 [MethodD](method_d.py) 位于仓库根目录，可用于单图预测或批量实验：
@@ -135,7 +192,9 @@ with MethodD(device="cuda:1", output_dir="outputs/my_prediction") as pipeline:
     individual_masks = result.segmentations
 ```
 
-`prepare_image(image)` 生成并缓存候选和点；`predict(image, instruction)` 复用这些数据并返回 `PredictionResult`，不接收 GT；`run_manifest(path)` 执行批量预测及可选评估。同一实例复用模型和同图候选，但不同指令重新判断点。再次使用同一个 `sample_id` 会报错，避免覆盖。
+`prepare_image(image)` 生成并缓存候选和点；`prepare_manifest(path)` 只准备整份清单的候选；`predict(image, instruction)` 返回 `PredictionResult`，不接收 GT；`run_manifest(path)` 执行批量预测及可选评估。同一实例复用 SAM 2、Valen 和同图候选，不同指令重新判断点；UnSAMv2+ 按图启动子进程，加载及推理耗时单独记录。再次使用同一个 `sample_id` 会报错，避免覆盖。
+
+主类同样支持 `candidate_model="unsamv2-plus"`、`granularity=0.15` 和 `max_candidates=0`。默认 `candidate_model="sam2"` 对应初版基线；`generator_config` 可覆盖候选生成器参数，用于保持生成参数一致的对照。
 
 省略 `output_dir` 时使用临时工作目录，退出上下文后自动清理；返回的 mask 等数组仍可使用。需要保留中间文件时指定新输出目录。实例用于串行调用。
 
@@ -147,8 +206,13 @@ run_method_d.py         # 命令行入口
 method_d_utils.py       # 取点、标记、点提示及点评估
 mask_utils.py           # 候选过滤、mask 合并及像素评估
 experiment_utils.py     # 清单、文件、模型元数据和可视化工具
+unsamv2_backend.py      # UnSAMv2+ 官方实现的独立进程适配
+compare_candidates.py  # 已生成候选的可视化与离线比较
+dense_partition.py     # 互斥全覆盖分区、SLIC、Mask 导出与验证
+run_dense_partition.py # 三方法分区对照与交互查看
 scripts/
-  download_models.py    # scripts 中唯一的脚本
+  download_models.py    # 下载 SAM 2、Valen
+  download_unsamv2.py    # 下载 UnSAMv2+ 权重和仓库外的推理代码
 configs/umd_debug.json
 tests/
 environment.yml
@@ -163,6 +227,10 @@ python -m unittest discover -s tests -v
 测试包括连通域与并集语义，以及主类的同图多指令、空预测、GT 读取时机和候选缓存校验。首版代码可从 Git 提交 `3d57ce5` 查看，历史实验结论见文档 05。
 
 2026-10-17 已在上述 Miniconda 环境中通过 18 项测试和 `pip check`，并完成 6 条任务的两次真实模型回归：导入旧候选、D 自行生成候选。两次运行的候选、点、111 个 Noul 分数、15 次 SAM 分割及最终 mask 均与初版完全一致，平均 IoU 为 0.1241727471。缓存清理后也通过了 18 项测试和真实模型单图推理检查。实验输出是未纳入 Git 的本地产物，清理后需重新运行生成。
+
+新增 UnSAMv2+ 后，21 项测试与 `pip check` 通过；已实际运行 4 档粒度候选、同生成参数 SAM 2 对照，以及两组新的完整 D。`g=0.15` 的平均 IoU 为 0.125702，改善了部分部件采样，也存在漏检；详细结果与可视化见 [文档 05 第 11 节](docs/05_method_d_analysis_and_improvements.md#11-unsamv2细粒度全图候选实验)。
+
+Dense Partition 实验新增后，27 项测试与 `pip check` 通过。5 张图、3 个方法、3 个展示档位的 45 份导出全部通过逐像素互斥全覆盖检查；本地浏览器验证了方案切换、Mask 高亮和二值 Mask 下载。实际效果与限制见文档 05 第 12 节。
 
 ## 阅读入口
 

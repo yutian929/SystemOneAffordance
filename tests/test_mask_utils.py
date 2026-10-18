@@ -57,6 +57,9 @@ class MaskUtilsTest(unittest.TestCase):
         self.assertEqual(len(kept), 4)
         self.assertEqual(min(p['area'] for _, p in kept), 1)
         self.assertGreaterEqual(max(p['area'] for _, p in kept), 30)
+        uncapped, counts = select_candidates(proposals, maximum=None)
+        self.assertEqual(len(uncapped), 40)
+        self.assertEqual(counts['retained_count'], 40)
 
     def test_real_noul_schema_and_invalid_scores(self):
         def response(value):

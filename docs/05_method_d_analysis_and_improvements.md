@@ -4,7 +4,11 @@
 
 本文详细记录方法 D 的第一版实现，并作为后续讨论、对照实验和改进的记录入口。总体实验方案见 [04 最小 Affordance 决策测试](04_minimal_affordance_test.md)。
 
-**当前状态：D 初版已完成 5 张图、6 条调试任务的端到端运行；已补做固定点标签的 SAM 对照实验；代码已重构为仓库根目录的 `MethodD` 主类，使用独立 Miniconda 环境。算法改进方案尚未合入主程序。** 当前主程序仍使用“连通域内部中心点 → Noul 阈值 0.5 → 每个前景点配合全部背景点 → SAM 单 mask 输出 → 取并集”。
+**当前状态：D 初版已完成 5 张图、6 条调试任务的端到端运行；已补做固定点标签的 SAM 对照实验；代码已重构为仓库根目录的 `MethodD` 主类，使用独立 Miniconda 环境，并新增可选 UnSAMv2+ 候选生成。** 点判断与最终分割仍使用“连通域内部中心点 → Noul 阈值 0.5 → 每个前景点配合全部背景点 → SAM 单 mask 输出 → 取并集”。
+
+后续实验：已增加可选的 **UnSAMv2+ 全图候选生成**，支持连续粒度参数和不限制候选数量。初版 SAM 2 路径仍可复现；新的模型接入范围、参数和实验结果统一记录在第 11 节。
+
+**当前实验重点已收敛到第一阶段：全覆盖、互不重叠的 Dense Partition 候选。** 第 12 节记录 SAM 2.1、UnSAMv2+ 和传统图像处理方法的比较。该实验独立于原 D 的取点和判断流程，暂不进行 affordance 决策。
 
 2026-10-17 的结构调整把自动候选生成纳入 D，自行读取样本清单；旧 A/D 候选缓存作为可选输入。本文的算法步骤保持初版定义，代码入口和复现方式已更新。原始脚本可在 Git 提交 `3d57ce5` 中查看。
 
@@ -18,6 +22,8 @@
 | [mask_utils.py](../mask_utils.py) | 候选过滤、Noul 解析、mask 合并与像素评估 |
 | [experiment_utils.py](../experiment_utils.py) | 清单校验、文件、模型元数据和可视化工具 |
 | [environment.yml](../environment.yml) | 独立 Miniconda 环境定义 |
+| [unsamv2_backend.py](../unsamv2_backend.py) | 固定版本 UnSAMv2+ 的全图候选适配 |
+| [compare_candidates.py](../compare_candidates.py) | 候选与采样点对照、离线覆盖诊断及可视化 |
 | [umd_debug.json](../configs/umd_debug.json) | 最初的调试样本清单 |
 | [D 初版运行配置](../outputs/method_d_debug/run.json) | 初版实验的模型 revision、设备、精度与参数 |
 
@@ -109,7 +115,7 @@ D 自行生成或从兼容缓存导入的全部候选 mask
 
 ### 4.1 读取配置，确定本次任务
 
-当前根目录入口 `run_method_d.py` 支持 `--manifest`、`--output`、`--device`、`--threshold` 和可选的 `--candidate-cache`。默认清单为 `configs/umd_debug.json`，输出为 `outputs/method_d_run`，设备为 `cuda:1`，阈值为 0.5。
+根目录入口 `run_method_d.py` 的初版兼容参数包括 `--manifest`、`--output`、`--device`、`--threshold` 和可选的 `--candidate-cache`。默认清单为 `configs/umd_debug.json`，输出为 `outputs/method_d_run`，设备为 `cuda:1`，阈值为 0.5。新增候选模型、粒度、数量上限及只准备候选的参数见第 11 节。
 
 主类初始化时校验阈值，建立新输出目录，固定随机种子为 0；模型按需加载。`run_manifest()` 通过 `read_manifest()` 检查任务 ID、指令、文件路径和图像内容哈希，并保存当次清单。`threshold` 由当前实例设置，不再继承旧 A 配置。
 
@@ -576,8 +582,374 @@ D 额外进行了 15 次任务分割调用。自动候选成本复用自 A，`so
 - [x] 初版 D 的候选复用、取点、判断、分割、合并和评估已实现。
 - [x] 同一批 6 条调试任务已完成，保存了完整中间结果。
 - [x] 已完成四种 SAM 提示/输出组合的诊断，原 D 输出可逐像素复现。
-- [ ] 候选覆盖和多点采样改进尚未实现、验证。
+- [x] 已增加 UnSAMv2+ 细粒度候选方案；各粒度的覆盖与采样对照见第 11 节。
+- [ ] 连通域内多点采样改进尚未实现、验证。
 - [ ] 三态判断、负点筛选和新增质量规则尚未实现、验证。
 - [ ] 独立的 20 条固定检查任务及冻结配置比较尚未完成。
 
 后续新增实验时，应补充实际配置、结果路径、失败案例及结论适用范围；只有已经运行并确认的改动才更新“当前实现”部分。
+
+## 11. UnSAMv2+：细粒度全图候选实验
+
+### 11.1 模型与本轮接入范围
+
+使用作者发布的 **UnSAMv2+** 权重。它在 UnSAMv2 的伪标签训练流程中加入 SA-1B 标注；粒度参数 `g` 越小，目标越偏向细小部件，越大则偏向较大的整体。参数范围为 `[0.1, 1.0]`。来源：[官方模型列表](https://github.com/yujunwei04/UnSAMv2#model-zoo)、[论文第 3.6 节与粒度定义](https://arxiv.org/html/2511.13714v2)。
+
+本轮首先改变 D 的全图候选生成阶段，固定原来的取点、Valen 提示与阈值、正负点组合和最终 SAM 2.1 small 分割，以观察候选改变带来的影响：
+
+```mermaid
+flowchart TD
+    I["原图 RGB: H × W × 3"] --> U["UnSAMv2+ 全图生成<br/>粒度 g，网格与质量阈值"]
+    U --> R["原始 proposals<br/>mask、质量分、稳定性、面积"]
+    R --> K["IoU 去重与可选数量上限<br/>K 个候选 mask"]
+    K --> P["每个 8 连通域取内部中心点<br/>同坐标去重得到 P 个点"]
+    P --> S["prepare 阶段输出<br/>masks.npz、metadata.json、points.json、可视化"]
+    P --> V["逐点标记原图 + 任务指令<br/>Valen 输出 P 个分数"]
+    V --> F["0.5 阈值划分前景和背景点"]
+    F --> M["每次一个前景点 + 全部背景点<br/>SAM 2.1 small 输出 mask"]
+    M --> O["各 mask 并集<br/>最终 bool[H,W]"]
+```
+
+“全图自动候选”是对整张图自动生成 mask，不保证像素被无重叠地完整划分。候选仍可能嵌套、重叠或漏掉功能部位；粒度数值也不是固定的像素面积或候选个数。最终点提示分割换成 UnSAMv2+ 是另一项实验，本轮尚未实施。
+
+### 11.2 固定资源与生成配置
+
+| 项目 | 本轮配置 |
+| --- | --- |
+| 官方代码提交 | `f4ec1136ce5ce2c38061dfbe3dc8233ea90dd53a` |
+| 配置文件 | `configs/unsamv2_small.yaml` |
+| 权重 | 作者 Model Zoo 的 `unsamv2_plus_ckpt.pt`，188689844 字节 |
+| 权重 SHA-256 | `4067a6966b06df984828f537da0f02389ff28655a8985a1e1f4a3e1de4077195` |
+| 试验粒度 | `0.10 / 0.15 / 0.30 / 0.60`，全部图片统一使用同一组值 |
+| 自动网格与 batch | `points_per_side=64`、`points_per_batch=64` |
+| mask / 质量阈值 | `mask_threshold=-1`、`pred_iou_thresh=0.77` |
+| 稳定性 | `stability_score_thresh=0.9`、`stability_score_offset=0.7` |
+| NMS / crop | `box_nms_thresh=0.7`、`crop_n_layers=0` |
+| 自动候选细化 | `use_m2m=True` |
+| 后处理 | `apply_postprocessing=False`、`min_mask_region_area=0`；未启用 CascadePSP |
+| 候选后筛选 | 保留 IoU 去重阈值 0.90；`max_candidates=0` 表示不限数量 |
+| 精度与设备 | `cuda:1`、bfloat16 autocast、种子 0 |
+
+生成参数参考 [官方全图分割示例](https://github.com/yujunwei04/UnSAMv2/blob/f4ec1136ce5ce2c38061dfbe3dc8233ea90dd53a/sam2/notebooks/whole_image_segmentation.ipynb)，batch 从 128 降至 64，并保持原 D 的无额外后处理设置。细粒度全分割先保留全部去重候选，以免 24 个候选上限截掉部件。
+
+粒度实际通过 `generator.generate(rgb, gra=g)` 传入；此版本构造器中的 `granularity` 字段不会被生成流程使用。接口核对见 [固定版本生成器](https://github.com/yujunwei04/UnSAMv2/blob/f4ec1136ce5ce2c38061dfbe3dc8233ea90dd53a/sam2/sam2/automatic_mask_generator.py)。
+
+原基线使用 32 点/边、1 层 crop、质量阈值 0.8、稳定性阈值 0.95，因此直接比较新方案和初版会同时涉及模型与生成参数变化。本轮额外加入使用上述相同生成参数、同样不限候选数的 SAM 2 对照。不同 `g` 的 UnSAMv2+ 运行之间只改变粒度。
+
+### 11.3 安装与复现
+
+使用已有 Miniconda 环境，新增依赖为 `opencv-python-headless==4.11.0.86`。执行 [download_unsamv2.py](../scripts/download_unsamv2.py) 下载并校验权重，将官方推理源码固定在仓库外的用户缓存目录。UnSAMv2 fork 与原 SAM 2 都使用 `sam2` 包名，适配器用独立子进程运行候选模型，避免两个实现互相覆盖。每张图的 `metadata.json` 保存模型加载、生成和子进程墙钟耗时。
+
+```bash
+source /home/hri/miniconda3/etc/profile.d/conda.sh
+conda activate systemone-affordance
+unset PYTHONPATH
+python -m pip install opencv-python-headless==4.11.0.86
+python scripts/download_unsamv2.py
+python run_method_d.py --stage prepare --candidate-model unsamv2-plus \
+  --granularity 0.15 --max-candidates 0 --device cuda:1 \
+  --output outputs/unsamv2_prepare_new
+```
+
+`prepare` 阶段保存全图候选和点，不调用 Valen，也不读取 GT 像素。已有候选可以继续作为完整 D 的输入，参数需匹配：
+
+```bash
+python run_method_d.py --candidate-model unsamv2-plus \
+  --granularity 0.15 --max-candidates 0 --device cuda:1 \
+  --candidate-cache outputs/unsamv2_prepare_new \
+  --output outputs/method_d_unsam015_new
+```
+
+缓存会核对候选模型、权重、源码提交、粒度、生成参数、数量上限和图像哈希。更改粒度后需重新生成候选，不能继续使用另一粒度的候选目录。
+
+相同生成参数的 SAM 2 对照通过主类配置，复现时使用新目录：
+
+```python
+from method_d import MethodD
+from unsamv2_backend import GENERATOR
+
+with MethodD(device="cuda:1", output_dir="outputs/sam2_matched_new",
+             candidate_model="sam2", generator_config=GENERATOR,
+             max_candidates=0) as pipeline:
+    pipeline.prepare_manifest("configs/umd_debug.json")
+```
+
+完整对照可在另一新实例中设置相同参数和 `candidate_cache="outputs/sam2_matched_new"`，再调用 `run_manifest()`。
+
+### 11.4 全图候选与粒度对照结果
+
+2026-10-17 已实际运行 5 张不同图像、6 条任务。刀的两个任务共享候选，但分别判断点。下表的 K、P 和微小连通域按 **5 张图去重汇总**；任务点数和 GT 命中按 **6 条任务汇总**。GT 只用于候选、点已经固定后的离线分析；没有依据 GT 为每张图选择不同粒度。
+
+| 候选方案 | 候选数 K | 去重点数 P | 面积 ≤16 的连通域数 | 6 任务点数 | 命中的 GT 连通域 / 总数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 初版 SAM 2 配置 | 56 | 100 | 42 | 111 | 4 / 8 |
+| SAM 2，相同生成参数 | 127 | 375 | 223 | 422 | 7 / 8 |
+| UnSAMv2+，g=0.10 | 97 | 97 | 0 | 117 | 5 / 8 |
+| UnSAMv2+，g=0.15 | 108 | 125 | 17 | 147 | 5 / 8 |
+| UnSAMv2+，g=0.30 | 49 | 87 | 31 | 103 | 5 / 8 |
+| UnSAMv2+，g=0.60 | 23 | 211 | 170 | 292 | 3 / 8 |
+
+“面积 ≤16”仅用于统计碎片，并未据此删除候选或点。`g=0.60` 虽然候选更少，但大区域中的断开碎片更多，因而点数反而增大；粒度、候选数和点数不是单调对应关系。`g=0.10` 在这批图像上没有此类微小碎片，但也会漏掉完整的功能部位，例如刀刃目标完全没有被候选覆盖。
+
+以本轮完整 D 使用的 `g=0.15` 为例：
+
+| 任务 | 初版目标内点数 → g=0.15 | 初版最佳单候选 IoU → g=0.15 | 观察 |
+| --- | ---: | ---: | --- |
+| knife_grasp | 1 → 0 | 0.0551 → 0.0010 | 刀柄覆盖下降，未采到目标 |
+| knife_cut | 1 → 2 | 0.8938 → 0.5545 | 仍命中刀刃，但单个候选更不完整 |
+| mug_grasp | 0 → 1 | 0.1160 → 0.6561 | 杯柄有独立且较贴合的候选 |
+| spoon_scoop | 2 → 1 | 0.5609 → 0.1274 | 碗部被切成局部，覆盖明显下降 |
+| hammer_pound | 0 → 1 | 0.0075 → 0.2257 | 锤头目标附近出现可用点 |
+| clutter_grasp | 1 → 2 | 0.3522 → 0.1572 | 两个点仍只命中 3 个 GT 区域中的 1 个 |
+
+这里的“最佳单候选 IoU”是事后查看所有候选得到的诊断上限，不是模型自动选择的结果，也不是完整 D 的输出。
+
+相同生成参数的 SAM 2 对照也产生了较好的杯柄、锤头候选，最佳单候选 IoU 分别为 0.6527、0.8784。因此，不能把相对初版的部件改善全部归功于 UnSAMv2+ 权重。UnSAMv2+ 的明确能力是显式控制粒度；本轮 `g=0.15` 相比同参数 SAM 2 的点数更少，但候选覆盖也有损失。
+
+候选推理本身的 5 图累计耗时：初版约 7.57 秒，同参数 SAM 2 约 46.20 秒，UnSAMv2+ 四档粒度各约 36.37～40.19 秒。这些数值不含加载、绘图和文件保存；UnSAMv2+ 还需加上每图独立进程的启动及加载成本。硬件为共享 GPU，不将这组耗时视为严格性能基准。
+
+实际产物：
+
+- [交互对照页面](../outputs/unsamv2_comparison/analysis/index.html)：切换 6 个候选方案，开关采样点，并查看逐候选图。
+- [全图分割总览](../outputs/unsamv2_comparison/analysis/overview.jpg)：原图与各方案并排。
+- [配置与逐任务 JSON](../outputs/unsamv2_comparison/analysis/comparison.json)、[CSV](../outputs/unsamv2_comparison/analysis/comparison.csv)。
+- 原始候选目录：`outputs/unsamv2_comparison/{g010,g015,g030,g060,sam2_matched}/`；初版参照为 `outputs/method_d_run/`。
+
+对照页面可重新生成到新目录：
+
+```bash
+python compare_candidates.py --runs \
+  baseline=outputs/method_d_run \
+  sam2_matched=outputs/unsamv2_comparison/sam2_matched \
+  g010=outputs/unsamv2_comparison/g010 \
+  g015=outputs/unsamv2_comparison/g015 \
+  g030=outputs/unsamv2_comparison/g030 \
+  g060=outputs/unsamv2_comparison/g060 \
+  --output outputs/unsamv2_comparison_new
+```
+
+### 11.5 完整 D 结果与失败位置
+
+完整 D 运行使用官方全图示例中的 `g=0.15`，没有按最终 IoU 在四档中择优。另运行同生成参数的 SAM 2 完整对照。三组均使用原来的逐连通域取点、Valen 判断与 0.5 阈值、全部预测负点、最终 SAM 2.1 small 单 mask 输出及并集合并。
+
+| 指标 | 初版 D | SAM 2，相同生成参数 | UnSAMv2+，g=0.15 |
+| --- | ---: | ---: | ---: |
+| knife_grasp IoU | 0.064536 | 0.000000 | 0.000000 |
+| knife_cut IoU | 0.490457 | 0.000000 | 0.491439 |
+| mug_grasp IoU | 0.000000 | 0.000000 | 0.000000 |
+| spoon_scoop IoU | 0.047742 | 0.000000 | 0.086638 |
+| hammer_pound IoU | 0.000000 | 0.000000 | 0.015753 |
+| clutter_grasp IoU | 0.142301 | 0.047010 | 0.160383 |
+| 平均 IoU | **0.124173** | **0.007835** | **0.125702** |
+| Valen 判断次数 | 111 | 422 | 147 |
+| 最终 SAM 分割调用次数 | 15 | 69 | 17 |
+
+UnSAMv2+ 相对初版平均 IoU 仅增加约 **0.00153**，不足以说明稳定提升。逐步检查显示：
+
+1. **候选与取点仍会漏目标。** `g=0.15` 的刀柄没有目标点；Clutter 仍未覆盖全部目标连通域。单一较细粒度不足以同时表达所有功能部位。
+2. **采到了目标，Valen 也可能拒绝。** 杯柄出现 1 个目标点，但该点被判为背景，同时接受了 1 个非目标点，所以最终 IoU 仍为 0。
+3. **正确前景点不保证最终 mask 完整。** 锤头的目标点被接受，但最终仅预测了 46 个目标像素，GT 为 2920 像素，IoU 为 0.01575。
+4. **更高候选覆盖不保证完整流程更好。** 同参数 SAM 2 命中了 7/8 个 GT 区域，但刀柄、刀刃、勺子、锤子在有前景点的情况下都返回空 mask；Clutter 接受了 60 个点，其中 55 个是误判。当前“所有背景点参与每次分割”的规则在点数大幅增加后值得单独对照。这是待验证的原因，尚不能仅凭本次输出将空 mask 全部归因于负点数量。
+
+来源：[三组端到端指标 JSON](../outputs/unsamv2_comparison/analysis/end_to_end.json)、[CSV](../outputs/unsamv2_comparison/analysis/end_to_end.csv)；完整原始输出为 [UnSAMv2+ D 汇总](../outputs/unsamv2_comparison/d_g015/summary.json) 和 [同参数 SAM 2 D 汇总](../outputs/unsamv2_comparison/d_sam2_matched/summary.json)。对应目录的 `samples/<任务>/` 保留逐点响应、每次分割的正负坐标及各 mask，便于继续诊断。
+
+### 11.6 下一步改进顺序
+
+目前保留初版为默认入口，UnSAMv2+ 通过 `candidate_model` 显式启用。建议继续沿此候选路线做三项独立实验，以下均尚未实现：
+
+1. **多个固定粒度联合生成。** 对所有图片统一使用如 `g={0.10,0.15,0.30}`，合并后按 mask IoU 去重，保留粒度来源，检查细部件与完整部位能否互补。同时记录候选和点预算，不能逐图看 GT 选粒度。
+2. **从候选到点的碎片与冗余控制。** 比较连通域内代表点、相近点合并和点预算；记录被删点的来源和目标覆盖变化，避免简单的面积阈值删掉真实小部件。
+3. **固定候选后再改决策与最终分割。** 分别比较 Valen 部位判断、负点选择，以及 UnSAMv2+ 点提示分割。这样可以区分改进来自候选、判断还是最后的边界生成。
+
+这批只有 6 条调试任务，结论限于当前样例。正式选择默认粒度与配置前，仍需要第 10 节的独立检查样本。本轮代码已通过 21 项单元测试，完成四档真实候选推理及上述两组新的完整 D 运行；模型、数据和输出继续不纳入 Git。
+
+## 12. Dense Partition：全覆盖、互斥的细粒度候选
+
+### 12.1 任务重新定义
+
+本阶段只输入 RGB 图片，输出一组分区 Mask。对图像像素集合 Ω 和非空 Mask 集合 `{M₁,…,Mₖ}`，要求：
+
+```text
+并集覆盖：M₁ ∪ … ∪ Mₖ = Ω
+两两互斥：Mᵢ ∩ Mⱼ = ∅，对于任意 i ≠ j
+等价检查：对每个像素 (x,y)，Σᵢ Mᵢ(x,y) = 1
+```
+
+另要求每个 Mask 为单个 **4 连通区域**，便于以后一个区域对应一个代表点。这里只生成分区，不取点、不调用 Valen、不执行最终任务分割，也不读取 GT。
+
+SAM 2 / UnSAMv2+ 的自动 mask 集合可以嵌套、重叠和漏像素，其全图生成接口不天然满足上述条件。因此本轮明确区分：
+
+| 展示结果 | SAM 2.1 / UnSAMv2+ 两列 | SLIC 一列 |
+| --- | --- | --- |
+| 模型分区 `native` | 处理候选重叠、补齐连通空白区、合并微小区域 | 第一档 SLIC 分区，用作参照 |
+| 全图细分 `s600` / `s1200` | 模型互斥分区与 SLIC 分区的交集，即**模型 + SLIC** | 纯 SLIC 分区 |
+
+`native` 中补出的区域不能称为模型预测出的对象，细分交集新增的边界也不能全部归功于模型。页面提供原始覆盖率和未覆盖像素视图来区分这些情况。来源：[SAM 2 官方自动候选示例](https://github.com/facebookresearch/sam2/blob/main/notebooks/automatic_mask_generator_example.ipynb)、[UnSAMv2 官方全图示例](https://github.com/yujunwei04/UnSAMv2/blob/f4ec1136ce5ce2c38061dfbe3dc8233ea90dd53a/sam2/notebooks/whole_image_segmentation.ipynb)。
+
+### 12.2 传统图像处理方法调研与选择
+
+这里需要的是可控的细分区，不要求每个区域已经有物体或功能语义。超像素方法与此目标较吻合；全局颜色 K-means 则容易把远处分离的同色像素放在同一类，不能直接作为连通 Mask 使用。
+
+| 方法 | 原理与粒度控制 | 对本任务的取舍 |
+| --- | --- | --- |
+| **SLIC** | 在 Lab 颜色与空间坐标中局部聚类；`n_segments` 控制目标数量，`compactness` 平衡颜色与空间距离 | 直接输出像素标签，密度容易设置，平坦背景也能细分；选择为本轮 DIP 方法。没有语义保证，可能切开一个部件 |
+| Felzenszwalb–Huttenlocher 图分割 | 根据邻接像素差异与区域内部差异合并图；`scale` 调节尺度 | 轮廓随图像变化，区域数量和大小间接控制；本组试跑出现很多纹理小块，同时保留很大的低纹理区 |
+| 标记控制 / Compact Watershed | 从种子在梯度地形中扩张；种子数量与紧致度控制分区 | 可全覆盖，须关闭 watershed 分界线留白；本组规则种子试跑在平坦区呈明显网格，边界依赖梯度和种子 |
+| Quickshift | 颜色与空间密度模式聚类，使用核尺度和连接距离控制细分 | 可以产生细分区，但目标区域数不直观，参数之间的影响较多；本轮未运行 |
+| SNIC | SLIC 相关的非迭代增长方法，从构造过程保证连接性 | 适合后续速度比较；本轮先采用已有成熟库实现的 SLIC，避免额外引入另一套实现；本轮未运行 |
+
+原始来源与实现说明：
+
+- [SLIC 原作者项目与论文入口](https://www.epfl.ch/labs/ivrl/research/slic-superpixels/)，[SLIC 论文 PDF](https://www.cs.jhu.edu/~ayuille1/JHUcourses/VisionAsBayesianInference2022/4/Achanta_SLIC_PAMI2012.pdf)。
+- [Felzenszwalb–Huttenlocher 原论文](https://cs.brown.edu/people/pfelzens/papers/seg-ijcv.pdf)。
+- [Compact Watershed 原论文](https://www.tu-chemnitz.de/etit/proaut/publications/cws_pSLIC_ICPR.pdf)。
+- [scikit-image 官方低层分割比较](https://scikit-image.org/docs/0.25.x/auto_examples/segmentation/plot_segmentations.html)，[固定版本 API](https://scikit-image.org/docs/0.25.x/api/skimage.segmentation.html)。
+- [SNIC 原作者项目与论文入口](https://www.epfl.ch/labs/ivrl/research/snic-superpixels/)。
+
+选 SLIC 的依据是本任务需要可控密度、完整分区以及容易复现的实现，不是声称它在所有图像上最好。已对全部 5 张图实际试跑 SLIC 600 / 1200、Felzenszwalb 和 Compact Watershed，使用统一参数、不看 GT 调参；对照保存在 [传统算法选型总览](../outputs/dense_partition_debug/dip_study/overview.jpg) 和 [实际配置与统计](../outputs/dense_partition_debug/dip_study/metrics.json)。
+
+### 12.3 本轮生成配置
+
+两个学习模型使用同一套自动生成参数，UnSAMv2+ 固定 `g=0.15`，全图统一使用该值：
+
+| 参数 | 配置 |
+| --- | --- |
+| 采样 | `points_per_side=96`，`points_per_batch=64` |
+| 过滤 | `pred_iou_thresh=0.5`，`stability_score_thresh=0.8` |
+| 稳定性与 mask 阈值 | `stability_score_offset=0.7`，`mask_threshold=-1.0` |
+| NMS 与裁剪 | `box_nms_thresh=0.7`，`crop_n_layers=0` |
+| 输出 | `use_m2m=True`，`multimask_output=True`，不设候选数上限 |
+| 额外模型后处理 | `apply_postprocessing=False`，不使用 CascadePSP |
+| 模型 | SAM 2.1 small；第 11 节固定版本的 UnSAMv2+ |
+| 精度 | GPU bfloat16 autocast；种子 0 |
+
+第 11 节的 UnSAMv2+ `g=0.15` 候选实际仅覆盖整图约 3.5%～4.8% 的像素，不能满足 Dense Partition 的全覆盖需求。本轮提高网格密度并放宽质量过滤，再由统一转换规则建立严格分区。放宽阈值有意保留更多局部区域，也可能引入噪声；覆盖率提高不等于边界更准确。
+
+SLIC 固定使用 `scikit-image==0.25.2`：
+
+```text
+n_segments = 600 或 1200
+compactness = 5.0；sigma = 0.5；max_num_iter = 10
+convert2lab = True；enforce_connectivity = True
+min_size_factor = 0.2；max_size_factor = 3.0
+slic_zero = False；start_label = 1
+```
+
+600 / 1200 是目标种子数量，经过连接性处理后实际 K 不一定相同。这里的两档独立计算，不保证 1200 档严格嵌套于 600 档。所有原图均为 640×480，保持原尺寸分区。
+
+### 12.4 从原始候选到严格分区
+
+实现见 [dense_partition.py](../dense_partition.py)，批量入口为 [run_dense_partition.py](../run_dense_partition.py)。
+
+1. **候选生成。** 输出 `masks[N,H,W]` 和 N 条质量、稳定性等记录。保存原始覆盖计数，统计未覆盖像素与重叠像素，不读取标签或任务文本。
+2. **重叠归属。** 按候选面积从小到大分配像素，优先保留细小部件。面积相同时按质量分、稳定性分从高到低，再按原始索引排序。每个像素只授予第一个覆盖它的候选。
+3. **显式补齐。** 没有候选覆盖的像素保留 `pixel_owners=0` 的来源标记；这些像素按 4 连通域生成补充区域。其余像素记录所属原候选索引加 1。零仅在来源图中表示未覆盖，最终分区标签全部为正。
+4. **拆开连通域。** 被重叠处理切开的候选重新拆分；每个 4 连通域拥有独立 ID。
+5. **微小区域合并。** 对模型分区中面积小于 16 像素的区域，按面积从小到大，合入 4 邻接且平均 Lab 颜色距离最近的区域，距离相同时取较小 ID。持续到没有可合并的小区域。该步骤会删除一些微小模型边界，不能声称完全保留原始边界；来源覆盖图保持原值，方便追查。
+6. **可选全图细分。** 将上一步的 `native` 标签与同图 SLIC 标签配对，每种 `(native_id, slic_id)` 组合形成一个区域，再拆成连通域。这样只细分现有区域，不跨越任一父分区；未覆盖的大区域也随之被细分。这一步之后不再合并碎片，以免破坏父分区边界，因而可能重新出现小于 16 像素的区域。
+7. **导出与独立检查。** 保存标签图和二值 Mask 集合，重新读取导出的 Mask，将所有 Mask 按像素相加，强制验证全部值都为 1，同时检查每个区域连通。
+
+```mermaid
+flowchart TD
+    I["RGB 图像，保持原尺寸"] --> A["SAM 2.1 自动候选"]
+    I --> B["UnSAMv2+ 自动候选，g=0.15"]
+    I --> C["SLIC：600 / 1200 目标区域"]
+    A --> P["统一转换：小区域优先归属<br/>补齐连通空白、拆连通域、合并微小区域"]
+    B --> P
+    P --> N["native：模型互斥全覆盖分区"]
+    N --> J["与同图 SLIC 分区求交<br/>再次拆分连通域"]
+    C --> J
+    N --> V["Mask 导出后重新读取<br/>逐像素验证 ΣMask=1"]
+    J --> V
+    C --> V
+    V --> O["标签图、Mask 集合、统计、交互对照"]
+```
+
+最终 `labels[y,x] ∈ {1,…,K}`，`Mask_i = (labels == i)`。不存在“边界像素不属于任何区域”的情况；可视化画出的线仅是叠加颜色。全覆盖是结构保证，不能作为模型准确率指标，也不能据 Mask 数量多就断言分割更好。
+
+### 12.5 查看、读取与复现
+
+- [三方法交互对照](../outputs/dense_partition_debug/index.html)：切换图片和细分档位，点击像素同步查看三种 Mask；可下载选中 Mask。
+- [模型分区总览](../outputs/dense_partition_debug/overview_native.jpg)、[600 档全图细分](../outputs/dense_partition_debug/overview_s600.jpg)、[1200 档全图细分](../outputs/dense_partition_debug/overview_s1200.jpg)。
+- [分区统计与逐像素验证](../outputs/dense_partition_debug/summary.json)、[CSV](../outputs/dense_partition_debug/summary.csv)。
+
+复现命令（激活现有 Conda 环境，使用新输出目录）：
+
+```bash
+python -m pip install scikit-image==0.25.2
+python run_dense_partition.py --device cuda:1 --granularity 0.15 \
+  --segments 600 1200 --output outputs/dense_partition_new
+```
+
+只改变 SLIC 密度时，在新输出目录运行并加 `--proposal-cache outputs/dense_partition_debug`；缓存会核对模型、权重、图像哈希、生成参数和粒度。
+
+输出目录结构：
+
+```text
+proposals/<sam2|unsamv2>/<图像哈希>/
+  masks.npz                 # 原始可重叠候选，供复核
+  metadata.json             # 模型、参数、分数、推理耗时
+  pixel_owners.npy           # 原候选索引+1；0 表示原模型未覆盖
+partitions/<图像哈希>/<sam2|unsamv2|slic>/<native|s600|s1200>/
+  labels.npy                # uint32[H,W]，每像素唯一正整数 ID
+  masks.npz                 # 无损位压缩二值 Mask 集合
+  ids.png                   # 用 RGB 字节编码 ID，供交互页面读取
+  metadata.json             # 每个 Mask 面积、原模型覆盖像素数、验证记录
+  boundaries.png / overlay.png / colors.png / coverage.png
+```
+
+读取时最直接使用 `labels == region_id`；需要逐个二值 Mask 时：
+
+```python
+import numpy as np
+from dense_partition import iter_masks
+
+labels = np.load("<某个分区目录>/labels.npy")
+mask_1 = labels == 1  # bool[H,W]
+for region_id, mask in iter_masks("<某个分区目录>/masks.npz"):
+    assert mask.dtype == bool
+```
+
+`masks.npz` 的 `packed_masks` 形状为 `[K,H,ceil(W/8)]`，使用 NumPy 默认的大端位顺序；`shape` 记录原 H、W，`ids` 为 1…K。位压缩只是无损存储，避免重复保存大量稀疏的整图数组。不同方法的同一个 ID 只是各自区域编号，不代表语义对应。
+
+### 12.6 实际结果与当前选择
+
+2026-10-17 完成全部 5 张不同 debug 图片；刀的两条指令复用同一图像，不重复计数。共导出 45 份结果，即 5 图 × 3 方法 × 3 展示档位；其中 SLIC 的 `native` 与 `s600` 是同一档算法结果的两个展示入口。
+
+**全部输出均满足覆盖率 100%、重叠像素 0、每个 Mask 为 4 连通区域。** 检查针对导出后重新读取的二值 Mask，而不是仅依据彩色图目测。全套 27 项单元测试、环境 `pip check` 通过；浏览器实际检查了 5 图 × 3 档切换、Mask 高亮及下载，下载的 PNG 与相应 `labels == id` 逐像素一致。
+
+以下为各方法独立分区的实际 Mask 数；两列模型只包含统一的互斥全覆盖转换，没有 SLIC 求交细分：
+
+| 图片 | SAM 2.1 `native` | UnSAMv2+ `native` | 纯 SLIC，目标 600 | 纯 SLIC，目标 1200 |
+| --- | ---: | ---: | ---: | ---: |
+| 刀 | 61 | 877 | 557 | 1151 |
+| 杯子 | 67 | 990 | 556 | 1150 |
+| 勺子 | 74 | 1005 | 554 | 1146 |
+| 锤子 | 57 | 875 | 560 | 1169 |
+| 杂物场景 | 67 | 883 | 539 | 1129 |
+
+模型原始候选在转换前的覆盖率如下。剩余像素虽被纳入最终分区，仍明确保留“模型原始未覆盖”的来源标记：
+
+| 图片 | SAM 2.1 原始覆盖 | UnSAMv2+ 原始覆盖 | 最终三方法覆盖 |
+| --- | ---: | ---: | ---: |
+| 刀 | 60.82% | 90.83% | 100% |
+| 杯子 | 62.82% | 97.39% | 100% |
+| 勺子 | 65.18% | 96.80% | 100% |
+| 锤子 | 61.67% | 93.83% | 100% |
+| 杂物场景 | 99.21% | 96.32% | 100% |
+
+在当前参数和这些图片上，视觉与分区统计共同显示：
+
+- **SAM 2.1 更偏整体区域。** 物体外轮廓、杯口/杯柄等结构可见，但背景和支撑面保留很大的区域；加密点网格并不等价于得到均匀细分。原始覆盖之外的区域只能由转换规则补齐。
+- **UnSAMv2+ 明显更细，但不规则边界也更多。** 提高覆盖率后，每图约 900～1000 个区域；一些边界沿纹理或低置信局部预测形成，并不对应真实物体部件。小区域优先的重叠归属还会放大这类碎片，不能把这里所有额外边界归结为模型能力提升。
+- **SLIC 最贴近当前“只要细粒度全覆盖候选”的目标。** 600 档实际每图约 550 个区域，1200 档约 1150 个；1200 档中位面积约 267～274 像素，区域数量与尺度容易控制。代价是没有物体语义，可能把一个部件切成几个区域，也可能跨过弱对比边界。
+
+因此，若本阶段只选择一个默认细分候选基线，建议先用 **纯 SLIC 1200 档**；若想减少区域数，用 600 档。保留 UnSAMv2+ `native` 作为带学习模型边界的对照，暂不据这 5 张图宣称其整体优于 SLIC。
+
+**模型与 SLIC 直接求交的细分结果暂不建议作为默认。** 它满足严格分区且保留父分区边界，但边界位置略有错位时会形成狭长微小区域：600 档 SAM 2.1 组合每图有 1335～1674 个区域，中位面积仅 4～13 像素；UnSAMv2+ 组合有 4257～4676 个区域，中位面积 12～21 像素。该对照被完整保留，展示“更细”可能过度碎片化的代价。后续若选择组合路线，需要研究带边界容差的融合，而不是无限叠加分割边界。
+
+实际 DIP 选型试跑中，Felzenszwalb 经统一的 4 连通拆分后，在杂物图仍保留了 50980 像素的大区域，同时也产生许多小纹理块；SLIC 600 档各图最大区域为 1158～1417 像素，更符合本阶段控制细分尺度的需要。Compact Watershed 在平坦区呈较规则的种子网格。以上只比较已列出的统一参数，不是对所有参数下算法优劣的排序。
+
+5 图累计候选推理时间约为 SAM 2.1 **105.57 秒**、UnSAMv2+ **75.20 秒**；SLIC 600 档约 **1.11 秒**。模型数字不含加载、分区转换、压缩导出及可视化，SLIC 数字为分区生成时间；模型使用共享 GPU，SLIC 使用 CPU，硬件和计时边界不同，只用于估计本次运行成本，不能视为严格速度基准。
+
+本轮没有完整场景的像素分区真值评价，不提供误导性的“分割准确率”，也没有继续运行 D 的后续判断阶段。下一步应先根据这些可点击 Mask 确认所需区域尺度，再决定保留纯 SLIC，还是研究能保留模型部件边界且减少碎片的融合方式。
