@@ -1,0 +1,13 @@
+# Add to the existing systemone-affordance Conda environment (keep requirements.txt).
+# Detectron2 source/CPU extension is prepared separately by download_semantic_sam.py.
+timm==0.4.12
+kornia==0.6.4
+fvcore==0.1.5.post20221221
+matplotlib==3.9.4
+pycocotools==2.0.11
+einops==0.8.1
+yacs==0.1.8
+cloudpickle==3.1.2
+tensorboard==2.20.0
+transformers==5.4.0
+ninja==1.13.0

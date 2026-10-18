@@ -8,7 +8,24 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
-METHOD_NAMES = {'sam2': 'SAM 2.1 small', 'unsamv2-plus': 'UnSAMv2+', 'slic': 'SLIC'}
+METHOD_NAMES = {'sam2': 'SAM 2.1 small', 'unsamv2-plus': 'UnSAMv2+',
+                'semantic-sam': 'Semantic-SAM', 'slic': 'SLIC'}
+
+SEMANTIC_SAM_CODE_URL = 'https://github.com/UX-Decoder/Semantic-SAM.git'
+SEMANTIC_SAM_CODE_REVISION = 'e11f8b518539faea731e2744cc3e44c24572e30d'
+SEMANTIC_SAM_CODE_DIR = ROOT / 'models/Semantic-SAM/source'
+SEMANTIC_SAM_DETECTRON_DIR = ROOT / 'models/Semantic-SAM/detectron2'
+SEMANTIC_SAM_DETECTRON_URL = 'https://github.com/MaureenZOU/detectron2-xyz.git'
+SEMANTIC_SAM_DETECTRON_REVISION = '42121d75e10d9f858f3a91b6a39f5722c02868f0'
+SEMANTIC_SAM_CHECKPOINT_SHA256 = 'cc2abda0fd77b56ea65a37fde6180fcf545c8e6b8ca644bcb19cf2cafacf1281'
+SEMANTIC_SAM_MODEL = {
+    'model_type': 'T',
+    'checkpoint_dir': ROOT / 'models/Semantic-SAM/swinT',
+    'checkpoint_name': 'swint_only_sam_many2many.pth',
+    'model_config': 'configs/semantic_sam_only_sa-1b_swinT.yaml',
+    'code_dir': SEMANTIC_SAM_CODE_DIR,
+    'detectron_dir': SEMANTIC_SAM_DETECTRON_DIR,
+}
 
 _RUNTIME = {
     'device': 'cuda:1',
@@ -76,7 +93,7 @@ def default_arguments(function):
             if parameter.default is not Parameter.empty}
 
 
-def make_config(method, *, device, unsam, slic):
+def make_config(method, *, device, unsam, slic, semantic_sam):
     """Combine public controls with fixed settings and return an independent snapshot."""
     if method not in METHOD_NAMES:
         raise ValueError(f'Unknown method {method!r}; choose from {tuple(METHOD_NAMES)}')
@@ -84,6 +101,11 @@ def make_config(method, *, device, unsam, slic):
     if method == 'slic':
         settings['runtime'].update(device='cpu', precision='float32')
         settings['algorithm'] = {**_SLIC, **slic}
+    elif method == 'semantic-sam':
+        settings['model'] = SEMANTIC_SAM_MODEL
+        settings['preprocess'] = {'input_size': 640}  # Official prepare_image default.
+        settings['runtime'].update(precision='float32')
+        settings['generator'] = {'level': semantic_sam['level']}
     else:
         settings['model'] = SAM2 if method == 'sam2' else {
             **UNSAMV2_PLUS, 'granularity': unsam['granularity']}
@@ -123,3 +145,26 @@ def validate_config(settings, method):
             granularity = settings['model']['granularity']
             if not math.isfinite(granularity) or not 0.1 <= granularity <= 1:
                 raise ValueError('granularity must be finite and in [0.1, 1]')
+        if method == 'semantic-sam':
+            if runtime['device'] == 'cpu':
+                raise ValueError('Semantic-SAM upstream inference requires CUDA')
+            if settings['model']['model_type'] != 'T':
+                raise ValueError('This integration uses the Semantic-SAM Swin-T checkpoint')
+            size = settings['preprocess']['input_size']
+            if type(size) is not int or size < 32:
+                raise ValueError('Semantic-SAM input_size must be an integer >= 32')
+            levels = generator['level']
+            if (not isinstance(levels, (list, tuple)) or not levels
+                    or any(type(level) is not int or not 1 <= level <= 6 for level in levels)
+                    or len(set(levels)) != len(levels)):
+                raise ValueError('Semantic-SAM level must contain distinct integers in [1, 6]')
+            area = generator.get('min_mask_region_area', 10)
+            if type(area) is not int or area < 0:
+                raise ValueError('min_mask_region_area must be a nonnegative integer')
+            offset = generator.get('stability_score_offset', 1.0)
+            if not math.isfinite(offset) or offset < 0:
+                raise ValueError('stability_score_offset must be finite and nonnegative')
+            if generator.get('crop_n_layers', 0) != 0:
+                raise ValueError('Semantic-SAM upstream supports only crop_n_layers=0')
+            if generator.get('point_grids') is not None:
+                raise ValueError('Semantic-SAM uses points_per_side; custom point_grids are unsupported')

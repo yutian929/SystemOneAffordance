@@ -13,7 +13,7 @@ from utils.result import PartitionResult
 class DensePartition(ABC):
     """Base contract: positive contiguous IDs, complete coverage, connected masks.
 
-    Use DensePartition.create('sam2' | 'unsamv2-plus' | 'slic').segment(image).
+    Use DensePartition.create('sam2' | 'unsamv2-plus' | 'semantic-sam' | 'slic').segment(image).
     Subclasses implement _segment_rgb; this base validates every returned result.
     """
     method: str
@@ -29,7 +29,7 @@ class DensePartition(ABC):
     @staticmethod
     def create(method=DEFAULT_METHOD, config=None):
         implementations = {'sam2': SAM21Partition, 'unsamv2-plus': UnSAMv2PlusPartition,
-                           'slic': SLICPartition}
+                           'semantic-sam': SemanticSAMPartition, 'slic': SLICPartition}
         if method not in implementations:
             raise ValueError(f'Unknown method {method!r}; choose from {tuple(implementations)}')
         return implementations[method](config)
@@ -68,6 +68,13 @@ class SAM21Partition(DensePartition):
 
 class UnSAMv2PlusPartition(DensePartition):
     method = 'unsamv2-plus'
+
+    def _segment_rgb(self, rgb):
+        return self._segment_with_proposals(rgb)
+
+
+class SemanticSAMPartition(DensePartition):
+    method = 'semantic-sam'
 
     def _segment_rgb(self, rgb):
         return self._segment_with_proposals(rgb)

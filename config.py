@@ -1,14 +1,18 @@
-"""日常配置；SAM 使用官方默认值，UnSAMv2+ 暴露 HF Demo 的三个控制项。"""
+"""日常配置；各方法的主要调节项集中在这里。"""
 from utils.settings import ROOT, METHOD_NAMES, make_config, validate_config
 
-DEFAULT_METHOD = 'slic'
+DEFAULT_METHOD = 'slic'  # Python API 的默认方法；命令行未指定 --method 时运行全部方法
 OUTPUT_DIR = ROOT / 'outputs/dense_partition'
 DEVICE = 'cuda:1'  # 单卡改为 cuda:0；SLIC 使用 CPU
 
 UNSAMV2_PLUS = {
-    'granularity': 0.2,  # [0.1, 1.0]，越小倾向越细
+    'granularity': 0.1,  # [0.1, 1.0]，越小倾向越细
     'pred_iou_thresh': 0.77,  # Predicted IoU threshold：降低保留更多候选
     'stability_score_thresh': 0.9,  # Stability threshold：降低筛选更宽松
+}
+
+SEMANTIC_SAM = {
+    'level': [1, 2, 3, 4, 5, 6],  # 1/2 偏语义，3 实例，4/5/6 部件；可只用 [3] 或 [6]
 }
 
 SLIC = {
@@ -28,4 +32,5 @@ DEBUG_IMAGES = (
 
 def get_config(method=DEFAULT_METHOD):
     """合并内部设置，返回本次运行的完整参数副本。"""
-    return make_config(method, device=DEVICE, unsam=UNSAMV2_PLUS, slic=SLIC)
+    return make_config(method, device=DEVICE, unsam=UNSAMV2_PLUS, slic=SLIC,
+                       semantic_sam=SEMANTIC_SAM)

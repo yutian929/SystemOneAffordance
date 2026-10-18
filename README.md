@@ -1,11 +1,11 @@
 # SystemOneAffordance
 
-当前只实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+ 和 SLIC，统一通过 `DensePartition` 接口调用。
+当前只实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+、Semantic-SAM 和 SLIC，统一通过 `DensePartition` 接口调用。
 
 ## 代码结构
 
 ```text
-dense_partition.py     # 抽象基类、三种实现、统一工厂及命令行入口
+dense_partition.py     # 抽象基类、四种实现、统一工厂及命令行入口
 config.py              # 日常调节项、设备、debug 图片
 utils/
   partition.py         # 解重叠、补齐区域、连通域、验证
@@ -13,16 +13,21 @@ utils/
   result.py            # PartitionResult：标签图、Mask 访问与保存
   io.py                # 图像读取、哈希、JSON、无损 Mask 导出与读取
   models.py            # 模型资源检查与独立推理进程
+  semantic_sam_adapter.py # Semantic-SAM 原图尺寸还原与运行兼容
   visualization.py     # 边界图、总览、交互查看页面
   cli.py               # 单图或批量运行
 scripts/
   download_sam2.py      # 仅下载 SAM 2.1
   download_unsamv2.py   # 仅下载 UnSAMv2+ 权重及固定版本源码
+  download_semantic_sam.py # Semantic-SAM 权重、固定源码及 Detectron2 编译
+  semantic_sam_worker.py # 使用当前 Conda Python 的独立推理进程
 tests/test_dense_partition.py
+tests/test_semantic_sam.py
 docs/
 environment.yml
 requirements.txt
 requirements-sam.txt
+requirements-semantic-sam.txt
 ```
 
 旧 `configs/` 目录、完整 D 流程、Valen 判断、取点、任务指令和 GT 评估代码已经移除。历史实验保留在 `docs/` 和本地 `outputs/`；旧实现可从 Git 提交 `3d62972` 查看。数据、模型、输出不纳入 Git。
@@ -50,7 +55,17 @@ python -m pip check
 
 环境使用 Python 3.10、PyTorch `2.6.0+cu124`、torchvision `0.21.0+cu124`、scikit-image `0.25.2`。SAM 源码版本固定在 `requirements-sam.txt`，在 PyTorch 安装后单独安装；关闭可选 CUDA 扩展，当前默认参数不依赖该扩展。GPU 推理需要兼容 CUDA 12.4 的 NVIDIA 驱动。
 
-`environment.yml` 设置 `PYTHONNOUSERSITE=1`、`PYTHONDONTWRITEBYTECODE=1`，避免其他项目的用户包干扰和仓库内字节码缓存。Conda 环境、Hugging Face 全局缓存及 UnSAMv2 源码放在仓库外。依赖清单已移除 Transformers 和视频解码依赖；运行 SLIC 不导入 PyTorch，也不需要模型文件。
+`environment.yml` 设置 `PYTHONNOUSERSITE=1`、`PYTHONDONTWRITEBYTECODE=1`，避免其他项目的用户包干扰和仓库内字节码缓存。Conda 环境、Hugging Face 全局缓存及 UnSAMv2 源码放在仓库外。基础依赖不包含 Transformers 和视频解码依赖；Semantic-SAM 的增量依赖单独列出。运行 SLIC 不导入 PyTorch，也不需要模型文件。
+
+Semantic-SAM 也使用同一个 `systemone-affordance` Conda 环境。激活后安装增量依赖并准备模型：
+
+```bash
+python -m pip install -r requirements-semantic-sam.txt
+python scripts/download_semantic_sam.py
+python -m pip check
+```
+
+保留当前 PyTorch `2.6.0+cu124`、torchvision、NumPy 和 Pillow，不执行上游面向旧环境的整份依赖安装。准备脚本需要 `git` 和 C++ 编译器，固定并验证 Semantic-SAM / Detectron2 源码，校验 Swin-T 权重 SHA-256，在 `models/Semantic-SAM/` 中构建 Detectron2 的 CPU 扩展以满足导入要求。推理使用 CUDA，deformable attention 使用上游提供的 PyTorch 参考实现，适配当前 PyTorch；这些兼容处理只在独立进程内生效。运行时不下载额外权重。
 
 ## 模型与参数
 
@@ -67,16 +82,19 @@ python scripts/download_unsamv2.py
 
 | 配置 | 用途（当前值以 `config.py` 为准） |
 | --- | --- |
-| `DEFAULT_METHOD` | `slic` |
+| `DEFAULT_METHOD` | Python API 默认 `slic`；命令行未指定 `--method` 时运行全部方法 |
 | `DEVICE` | 当前 `cuda:1`，单卡机器改为 `cuda:0`。SLIC 始终使用 CPU |
 | `UNSAMV2_PLUS.granularity` | 范围 `[0.1, 1.0]`，越小倾向越细；HF Demo 初始值为 `0.15` |
 | `UNSAMV2_PLUS.pred_iou_thresh` | 对应 Predicted IoU threshold；降低保留更多候选，HF Demo 默认 `0.77` |
 | `UNSAMV2_PLUS.stability_score_thresh` | 对应 Stability threshold；降低筛选更宽松，HF Demo 默认 `0.9` |
+| `SEMANTIC_SAM.level` | 唯一日常控制项：`[1]` / `[2]` 语义级，`[3]` 实例级，`[4]` / `[5]` / `[6]` 不同部件粒度；默认 `[1, 2, 3, 4, 5, 6]` 保留全部层级 |
 | `SLIC` | `n_segments` 越大越细；`compactness` 控制形状规则性，`sigma` 控制平滑；目标数不等于最终 Mask 数 |
 | `DEBUG_IMAGES` | 5 张不同的 debug 图片，只有图片路径，不包含任务指令或标注 |
 | `OUTPUT_DIR` | 默认 `outputs/dense_partition` |
 
 SAM 2.1 直接使用官方自动生成器默认值。UnSAMv2+ 独立使用上述三个控制项，其余采样设置参考 [官方 HF Demo 源码](https://huggingface.co/spaces/yujunwei04/UnSAMv2/blob/675a2bceabf284b69d5d537a3aa798b53c50a8ff/app.py)，不再与 SAM 共用一组生成参数。模型资源与内部设置在 `utils/settings.py`；`model_config='configs/…yaml'` 是第三方包内部资源路径。
+
+Semantic-SAM 使用官方 Swin-T 权重和 `SemanticSamAutomaticMaskGenerator`，只传入 `level`，其他生成参数采用官方默认值。按官方 `prepare_image` 将短边缩放到 640，生成候选后使用最近邻还原至原图分辨率，再进入统一分区流程。`level` 的含义见 [官方用法](https://github.com/UX-Decoder/Semantic-SAM#-a-few-lines-to-get-generated-results)；它是离散层级列表，可填写 `[3]`、`[6]` 或组合，不能直接等同于目标 Mask 数。公开权重只在 SA-1B 上训练，这里输出多粒度候选，不输出 affordance 或语义类别标签。
 
 最终分区只消除重叠、补齐未覆盖区域并拆分连通域，已移除额外的小区域合并。HF Demo 最多展示前 1000 个原始候选，本地保留全部候选后建立严格分区，因此最终 Mask 数及展示方式不等同于 Demo。
 
@@ -85,7 +103,7 @@ SAM 2.1 直接使用官方自动生成器默认值。UnSAMv2+ 独立使用上述
 ```python
 from dense_partition import DensePartition
 
-segmenter = DensePartition.create("slic")  # 也可选 "sam2"、"unsamv2-plus"
+segmenter = DensePartition.create("slic")  # 也可选 "sam2"、"unsamv2-plus"、"semantic-sam"
 result = segmenter.segment("data/umd/tools/knife_01/knife_01_00000122_rgb.jpg")
 
 labels = result.labels          # uint32[H, W]，ID 为 1…K，保留原图分辨率
@@ -109,21 +127,25 @@ settings["algorithm"]["n_segments"] = 600
 result = DensePartition.create("slic", config=settings).segment("your_image.jpg")
 ```
 
-`DensePartition` 是抽象基类；`SAM21Partition`、`UnSAMv2PlusPartition`、`SLICPartition` 均位于 `dense_partition.py`。新增方法实现 `_segment_rgb()`，由基类 `segment()` 统一读取图片、记录配置并验证输出契约。
+`DensePartition` 是抽象基类；`SAM21Partition`、`UnSAMv2PlusPartition`、`SemanticSAMPartition`、`SLICPartition` 均位于 `dense_partition.py`。新增方法实现 `_segment_rgb()`，由基类 `segment()` 统一读取图片、记录配置并验证输出契约。
 
 ## 命令行与可视化
 
 ```bash
-# 单图，默认 SLIC
+# 默认使用 config.DEBUG_IMAGES，对比全部四种方法
+python dense_partition.py --output outputs/partition_comparison
+
+# 指定单图，默认对比全部四种方法
 python dense_partition.py --image your_image.jpg --output outputs/one_image
 
-# debug 中每张图对比三种方法
-python dense_partition.py --debug --method sam2 unsamv2-plus slic \
-  --output outputs/partition_comparison
+# 只运行 Semantic-SAM，粒度在 config.py 的 SEMANTIC_SAM.level 中调节
+python dense_partition.py --method semantic-sam --output outputs/semantic_sam_run
 
 # 只运行 SLIC；也支持 --image 后面指定多张图片
-python dense_partition.py --debug --method slic --output outputs/slic_debug
+python dense_partition.py --method slic --output outputs/slic_debug
 ```
+
+不指定 `--image` 时默认读取 `config.DEBUG_IMAGES`；不指定 `--method` 时运行全部方法（SAM 2.1、UnSAMv2+、Semantic-SAM、SLIC）。`--debug` 仍可显式使用，与 `--image` 互斥。
 
 输出目录必须尚不存在，防止覆盖旧结果。打开输出目录中的 `index.html`，可切换图片、显示方式，点击像素查看各方法对应的 Mask，并下载二值 PNG；`overview.jpg` 是并排总览。
 
@@ -134,6 +156,8 @@ python dense_partition.py --debug --method slic --output outputs/slic_debug
 已生成全部 5 张 debug 图片的三方法 [前后对照页面](outputs/partition_before_after/index.html) / [总览图](outputs/partition_before_after/overview.jpg)，本次参数见 [summary.json](outputs/partition_before_after/summary.json)。
 
 `summary.json` 开头的 `config` 按方法保存本次运行的参数快照。完成模型推理后，`generator` 会包含官方默认值和本次覆盖值；UnSAMv2+ 的粒度位于 `model.granularity`，两个过滤阈值位于 `generator`。以后修改 `config.py` 不会改变已有结果记录的参数。
+
+Semantic-SAM 的层级记录在 `generator.level`；`backend` 保存源码版本、实际 Python、输入缩放尺寸及 attention 实现。其原始候选以原图尺寸保存，`raw_proposals` 中的 `area` / `bbox` / `point_coords` / `crop_box` 也转换至原图坐标；`inference_geometry` 另外保留上游推理尺寸的记录，其中提示点是上游的归一化坐标。
 
 ```text
 summary.json                         # 参数、统计和 completed 状态
@@ -166,9 +190,9 @@ for proposal_id, mask in iter_masks("<模型分区目录>/raw_masks.npz"):
     print(proposal_id, mask.sum())
 ```
 
-SAM / UnSAM 的原始候选先按小区域优先消除重叠，再将所有区域（包括未覆盖像素）拆成连通域。两模型分别在短生命周期子进程中运行，以隔离同名 `sam2` 包并释放显存；每张图都需要重新加载模型。SLIC 直接生成分区。基类检查正整数连续编号、原分辨率和 4 连通性；导出时再读取二值 Mask，逐像素检查 `sum(masks[:, y, x]) == 1`。
+SAM / UnSAM / Semantic-SAM 的原始候选先按小区域优先消除重叠，再将所有区域（包括未覆盖像素）拆成连通域。模型分别使用当前 Conda 的 Python 在短生命周期子进程中运行，以隔离同名 `sam2` / `utils` 包并释放显存；每张图都需要重新加载模型。SLIC 直接生成分区。基类检查正整数连续编号、原分辨率和 4 连通性；导出时再读取二值 Mask，逐像素检查 `sum(masks[:, y, x]) == 1`。
 
-全覆盖是输出结构保证，不能作为分割准确率；模型漏覆盖区域补齐后也不代表模型识别出了这些区域。当前不进行模型与 SLIC 求交细分，三种方法各自独立输出。
+全覆盖是输出结构保证，不能作为分割准确率；模型漏覆盖区域补齐后也不代表模型识别出了这些区域。当前不进行模型与 SLIC 求交细分，四种方法各自独立输出。
 
 ## 检查与研究记录
 
@@ -180,6 +204,8 @@ python -m unittest discover -s tests -v
 
 2026-10-18 首次重构验证（历史参数，提交 `0fbe7d0`）：11 项测试与 `pip check` 通过；15 份分区与重构前对应参数逐像素一致。查看 [历史三方法结果](outputs/dense_partition_refactored/index.html)。当前生成参数及后处理已调整，历史结果不代表当前默认输出。
 
-当前配置已通过 11 项测试和单图三方法真实运行；三份导出均通过全覆盖、无重叠及连通性检查。[本次结果](outputs/demo_controls_smoke/index.html) 的 [summary.json](outputs/demo_controls_smoke/summary.json) 记录实际参数。
+加入 Semantic-SAM 前的配置通过 11 项测试和单图三方法真实运行；三份导出均通过全覆盖、无重叠及连通性检查。[此前结果](outputs/demo_controls_smoke/index.html) 的 [summary.json](outputs/demo_controls_smoke/summary.json) 记录实际参数。
+
+2026-10-18 Semantic-SAM 接入验证：同一 Conda 环境中 16 项测试及 `pip check` 通过；默认全部层级完成 5 张 debug 图片的 GPU 推理，所有导出通过原分辨率、全覆盖、无重叠及连通性验证。查看 [Semantic-SAM 对照页面](outputs/semantic_sam_debug/index.html) / [总览图](outputs/semantic_sam_debug/overview.jpg)。最终区域数包含解重叠与连通域拆分，不能当作模型原始候选数或准确率。
 
 研究资料见 [文档导航](docs/README.md)；历史方法 D、三方法分割对照和本次重构架构见 [文档 05](docs/05_method_d_analysis_and_improvements.md)。

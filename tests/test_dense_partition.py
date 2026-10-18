@@ -7,7 +7,8 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dense_partition import DensePartition, SAM21Partition, UnSAMv2PlusPartition, SLICPartition
+from dense_partition import (DensePartition, SAM21Partition, UnSAMv2PlusPartition,
+                             SemanticSAMPartition, SLICPartition)
 from config import get_config
 from utils.io import export_partition, iter_masks
 from utils.partition import connected_labels, resolve_masks, validate_partition
@@ -73,6 +74,7 @@ class DensePartitionTest(unittest.TestCase):
 class CommonAPITest(unittest.TestCase):
     def test_factory_and_independent_configuration(self):
         for name, implementation in [('sam2', SAM21Partition), ('unsamv2-plus', UnSAMv2PlusPartition),
+                                     ('semantic-sam', SemanticSAMPartition),
                                      ('slic', SLICPartition)]:
             self.assertIsInstance(DensePartition.create(name), implementation)
         with self.assertRaises(TypeError):
@@ -143,14 +145,14 @@ class CommonAPITest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     engine.segment(rgb)
 
-    def test_both_models_resolve_overlaps_and_gaps(self):
+    def test_models_resolve_overlaps_and_gaps(self):
         rgb = np.zeros((8, 9, 3), np.uint8)
         masks = np.zeros((2, 8, 9), bool)
         masks[0, 1:7, 1:8] = True
         masks[1, 3:5, 3:6] = True
         records = [dict(predicted_iou=.99, stability_score=.99),
                    dict(predicted_iou=.6, stability_score=.8)]
-        for method in ('sam2', 'unsamv2-plus'):
+        for method in ('sam2', 'unsamv2-plus', 'semantic-sam'):
             settings = get_config(method)
             backend = {'generator': settings['generator']}
             with patch('utils.models.generate_proposals', return_value=(masks, records, backend)):
@@ -193,7 +195,7 @@ class CommonAPITest(unittest.TestCase):
 import builtins, runpy, sys
 original_import = builtins.__import__
 def guarded(name, *args, **kwargs):
-    if name.split('.')[0] in ('torch', 'sam2', 'transformers', 'av'):
+    if name.split('.')[0] in ('torch', 'sam2', 'semantic_sam', 'detectron2', 'transformers', 'av'):
         raise AssertionError('Unexpected model import: ' + name)
     return original_import(name, *args, **kwargs)
 builtins.__import__ = guarded

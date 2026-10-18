@@ -10,8 +10,25 @@ import time
 import numpy as np
 
 from utils.settings import (ROOT, SAM2_DOWNLOAD, UNSAM_CHECKPOINT_SHA256,
-                            UNSAM_CODE_REVISION, default_arguments)
-from utils.io import write_json
+                            UNSAM_CODE_REVISION, default_arguments,
+                            SEMANTIC_SAM_CODE_REVISION, SEMANTIC_SAM_DETECTRON_REVISION,
+                            SEMANTIC_SAM_CHECKPOINT_SHA256)
+from utils.io import file_digest, write_json
+
+
+def validate_semantic_source(model):
+    for key, revision, required in (
+        ('code_dir', SEMANTIC_SAM_CODE_REVISION, 'semantic_sam/build_semantic_sam.py'),
+        ('detectron_dir', SEMANTIC_SAM_DETECTRON_REVISION, 'detectron2/__init__.py'),
+    ):
+        directory = Path(model[key]).expanduser().resolve()
+        if not (directory / required).is_file():
+            raise FileNotFoundError('Run python scripts/download_semantic_sam.py to prepare Semantic-SAM')
+        actual = subprocess.check_output(['git', '-C', str(directory), 'rev-parse', 'HEAD'], text=True).strip()
+        if actual != revision:
+            raise ValueError(f'Semantic-SAM {key} revision differs: {actual}')
+        subprocess.run(['git', '-C', str(directory), 'diff', '--exit-code', 'HEAD'],
+                       check=True, capture_output=True)
 
 
 def validate_source(directory):
@@ -31,13 +48,15 @@ def validate_source(directory):
 def checkpoint_info(settings):
     model = settings['model']
     directory = Path(model['checkpoint_dir']).expanduser().resolve()
-    script = 'download_sam2.py' if settings['method'] == 'sam2' else 'download_unsamv2.py'
+    script = {'sam2': 'download_sam2.py', 'unsamv2-plus': 'download_unsamv2.py',
+              'semantic-sam': 'download_semantic_sam.py'}[settings['method']]
     required = (model['checkpoint_name'], 'source.json', 'verified.json')
     if not all((directory / path).is_file() for path in required):
         raise FileNotFoundError(f'Incomplete checkpoint in {directory}; run python scripts/{script}')
     source = json.loads((directory / 'source.json').read_text())
     verified = json.loads((directory / 'verified.json').read_text())
-    expected = SAM2_DOWNLOAD['revision'] if settings['method'] == 'sam2' else UNSAM_CHECKPOINT_SHA256
+    expected = (SEMANTIC_SAM_CODE_REVISION if settings['method'] == 'semantic-sam' else
+                SAM2_DOWNLOAD['revision'] if settings['method'] == 'sam2' else UNSAM_CHECKPOINT_SHA256)
     if (source['revision'] != expected or verified['revision'] != expected
             or not verified.get('all_files_present')):
         raise ValueError(f'Checkpoint verification metadata differs; rerun scripts/{script}')
@@ -45,14 +64,23 @@ def checkpoint_info(settings):
         path = directory / entry['path']
         if not path.is_file() or (entry.get('size') is not None and path.stat().st_size != entry['size']):
             raise ValueError(f'Missing or changed checkpoint file: {path}')
+    if settings['method'] == 'semantic-sam':
+        entries = [entry for entry in source['files'] if entry['path'] == model['checkpoint_name']]
+        if (source.get('model_type') != model['model_type'] or len(entries) != 1
+                or entries[0].get('sha256') != SEMANTIC_SAM_CHECKPOINT_SHA256
+                or file_digest(directory / model['checkpoint_name']) != SEMANTIC_SAM_CHECKPOINT_SHA256):
+            raise ValueError('Semantic-SAM checkpoint type or SHA-256 differs; rerun download_semantic_sam.py')
     return directory / model['checkpoint_name'], source
 
 
 def generate_proposals(rgb, settings):
-    """Isolate both sam2 packages and release CUDA memory after each image."""
+    """Isolate upstream packages and release CUDA memory after each image."""
     checkpoint, source = checkpoint_info(settings)
     if settings['method'] == 'unsamv2-plus':
         validate_source(settings['model']['code_dir'])
+    semantic = settings['method'] == 'semantic-sam'
+    if semantic:
+        validate_semantic_source(settings['model'])
     start = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix='dense_partition_') as temporary:
         directory = Path(temporary)
@@ -62,8 +90,10 @@ def generate_proposals(rgb, settings):
         env = os.environ.copy()
         env.pop('PYTHONPATH', None)
         env['PYTHONNOUSERSITE'] = env['PYTHONDONTWRITEBYTECODE'] = '1'
+        command = ([sys.executable, str(ROOT / 'scripts/semantic_sam_worker.py')] if semantic else
+                   [sys.executable, '-m', 'utils.models'])
         process = subprocess.run(
-            [sys.executable, '-m', 'utils.models', str(directory / 'request.json')],
+            [*command, str(directory / 'request.json')],
             cwd=ROOT, env=env, capture_output=True, text=True)
         if process.returncode:
             raise RuntimeError(f"{settings['method']} inference failed:\n{process.stderr[-6000:]}")
@@ -72,6 +102,9 @@ def generate_proposals(rgb, settings):
             masks = archive['masks']
     records = report.pop('records')
     report.update(checkpoint_source=source, worker_wall_seconds=time.perf_counter() - start)
+    if semantic:
+        report.update(code_revision=SEMANTIC_SAM_CODE_REVISION,
+                      detectron_revision=SEMANTIC_SAM_DETECTRON_REVISION)
     if process.stdout or process.stderr:
         report['worker_log'] = process.stdout + process.stderr
     return masks, records, report

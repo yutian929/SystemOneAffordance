@@ -5,22 +5,23 @@ from pathlib import Path
 
 from PIL import Image
 
-from config import DEBUG_IMAGES, DEFAULT_METHOD, METHOD_NAMES, OUTPUT_DIR
+from config import DEBUG_IMAGES, METHOD_NAMES, OUTPUT_DIR
 from utils.io import image_digest, read_image, write_json
 from utils.visualization import contact_sheet, write_viewer
 
 
 def main(factory):
     parser = argparse.ArgumentParser(description='Every pixel belongs to exactly one connected mask.')
-    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument('--image', type=Path, nargs='+', help='One or more input images')
-    inputs.add_argument('--debug', action='store_true', help='Use config.DEBUG_IMAGES')
-    parser.add_argument('--method', nargs='+', choices=tuple(METHOD_NAMES), default=[DEFAULT_METHOD])
+    inputs.add_argument('--debug', action='store_true', help='Use config.DEBUG_IMAGES (default)')
+    parser.add_argument('--method', nargs='+', choices=tuple(METHOD_NAMES), default=list(METHOD_NAMES),
+                        help='Methods to run (default: all methods)')
     parser.add_argument('--output', type=Path, default=OUTPUT_DIR, help='New output directory')
     args = parser.parse_args()
     methods = list(dict.fromkeys(args.method))
     engines = {method: factory.create(method) for method in methods}
-    paths = DEBUG_IMAGES if args.debug else args.image
+    paths = args.image if args.image is not None else DEBUG_IMAGES
     # Fail on invalid inputs before creating a partial output directory.
     images, seen = [], set()
     for path in paths:
