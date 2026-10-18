@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 import argparse
 from copy import deepcopy
+from datetime import datetime
 import json
 from pathlib import Path
 import time
@@ -117,7 +118,8 @@ if __name__ == '__main__':
     inputs.add_argument('--debug', action='store_true', help='Use config.DEBUG_IMAGES (default)')
     parser.add_argument('--method', nargs='+', choices=tuple(METHOD_NAMES), default=list(METHOD_NAMES),
                         help='Methods to run (default: all methods)')
-    parser.add_argument('--output', type=Path, default=OUTPUT_DIR, help='New output directory')
+    parser.add_argument('--output', type=Path,
+                        help='New output directory (default: outputs/dense_partition_<timestamp>)')
     args = parser.parse_args()
     methods = list(dict.fromkeys(args.method))
     engines = {method: DensePartition.create(method) for method in methods}
@@ -132,7 +134,7 @@ if __name__ == '__main__':
             images.append((Path(path), rgb, digest[:16]))
     if not images:
         parser.error('No input images configured')
-    output = args.output.expanduser().resolve()
+    output = (args.output or OUTPUT_DIR / f"dense_partition_{datetime.now():%Y%m%d_%H%M%S_%f}").expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Put the per-method configuration snapshot before potentially long image results.
     summary = {'completed': False, 'methods': methods,

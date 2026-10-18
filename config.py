@@ -2,7 +2,7 @@
 from common.settings import ROOT, METHOD_NAMES, make_config, validate_config
 
 DEFAULT_METHOD = 'slic'  # Python API 的默认方法；命令行未指定 --method 时运行全部方法
-OUTPUT_DIR = ROOT / 'outputs/dense_partition'
+OUTPUT_DIR = ROOT / 'outputs'  # 两个命令行入口共用的输出根目录；每次自动创建“脚本名_时间戳”子目录
 DEVICE = 'cuda:0'  # 单卡改为 cuda:0；SLIC 使用 CPU
 MIN_MASK_AREA = 16  # 原图像素数；小于此面积的最终区域并入邻居，0 关闭；适用于全部方法
 

@@ -17,6 +17,7 @@ from PIL import Image
 import json
 import os
 import subprocess
+import runpy
 
 
 class DensePartitionTest(unittest.TestCase):
@@ -232,6 +233,28 @@ runpy.run_path('dense_partition.py', run_name='__main__')
             self.assertTrue((output / 'index.html').is_file())
             with self.assertRaises(FileExistsError):
                 DensePartition.create('slic').segment(path).save(directory)
+
+    def test_no_argument_cli_runs_all_methods_in_new_timestamped_directories(self):
+        from config import METHOD_NAMES
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / 'input.png'
+            Image.fromarray(np.zeros((12, 17, 3), np.uint8)).save(path)
+            proposals = (np.ones((1, 12, 17), bool), [dict(score=1.)], {'generator': {}})
+            with patch('config.DEBUG_IMAGES', (path,)), patch('config.OUTPUT_DIR', directory / 'outputs'), \
+                    patch('sys.argv', ['dense_partition.py']), \
+                    patch('common.models.generate_proposals', return_value=proposals) as worker:
+                for _ in range(2):
+                    runpy.run_path(str(Path(__file__).resolve().parents[1] / 'dense_partition.py'), run_name='__main__')
+            outputs = list((directory / 'outputs').iterdir())
+            self.assertEqual(len(outputs), 2)
+            self.assertEqual(worker.call_count, 10)  # Five learned methods, twice; SLIC runs directly.
+            for output in outputs:
+                self.assertRegex(output.name, r'^dense_partition_\d{8}_\d{6}_\d{6}$')
+                report = json.loads((output / 'summary.json').read_text())
+                self.assertTrue(report['completed'])
+                self.assertEqual(report['methods'], list(METHOD_NAMES))
+                self.assertEqual(set(report['images'][0]['results']), set(METHOD_NAMES))
 
 
 

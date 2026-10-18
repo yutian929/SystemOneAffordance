@@ -1,6 +1,6 @@
 # UMD：面向 2D Affordance 的分割评价方案
 
-本文是待实现的评测方案。当前仓库已有六种分割方法和结果导出，下面的评测程序、指标文件和评测页面还没有实现。
+评测已实现在根目录 [affordance_benchmark.py](../affordance_benchmark.py)，包含抽象基类 `AffordanceBenchmark`、UMD 实现 `UMDBenchmark`、指标计算、CSV 导出和可视化。默认运行五张 debug 图及全部六种方法；正式人工标注帧清单仍需核实和提供，默认结果属于开发评测。
 
 ## 1. 我们到底要比较什么？
 
@@ -56,7 +56,7 @@ SAM2 / UnSAMv2+ / Semantic-SAM / PartGLEE / MoSA / SLIC
 
 ### 3.2 用一个 JSON 文件固定评测图片
 
-建议文件为 `benchmarks/umd/manifest.json`，其中每条记录是一张图片。下面是格式示例；这张现有 debug 图的人工标注身份尚未核实，所以写成 `unknown`，不能直接列入正式测试。
+自定义清单可以保存为 `benchmarks/umd/manifest.json`，每条记录是一张图片；仓库没有预置正式测试清单。下面是格式示例；这张现有 debug 图的人工标注身份尚未核实，所以写成 `unknown`，不能直接列入正式测试。
 
 ```json
 {
@@ -77,7 +77,7 @@ SAM2 / UnSAMv2+ / Semantic-SAM / PartGLEE / MoSA / SLIC
 
 路径相对仓库根目录；`subset` 是 `tools` 或 `clutter`；`sequence_id` 是工具实例或场景；`split` 是开发用的 `dev` 或正式测试用的 `test`；`annotation_status` 是 `manual`、`automatic` 或 `unknown`。
 
-正式测试只接收已核实的 `manual` 帧。核实依据也要随清单保存。图片清单和每种方法的配置在运行前固定，所有方法使用同一批图片。
+正式测试要求 `split="test"`、`annotation_status="manual"`，并在样本中或 JSON 顶层提供非空字符串 `annotation_evidence`，说明核实人工标注身份的依据。程序校验并保存这些字段，不自动验证依据的真实性，也不猜测人工帧号。图片清单和每种方法的配置在运行前固定，所有方法使用同一批图片。
 
 ## 4. 分割结果是什么？
 
@@ -99,7 +99,7 @@ labels = result.labels
 
 **左边的 1、2、3、4 只是区域 ID，不代表 grasp、cut 等类别；右边的编号才有功能含义。** 评测器要比较区域的形状，而不是直接比较这两张图的编号是否相等。
 
-第一版评价的是完成解重叠、补齐、连通域拆分和小区域合并后的最终分区。六种方法统一使用 `MIN_MASK_AREA=16`，保留完整配置快照。
+第一版评价的是完成解重叠、补齐、连通域拆分和小区域合并后的最终分区。六种方法统一读取 `config.MIN_MASK_AREA`，默认值为 16；运行时保存完整配置快照。
 
 ## 5. 用哪些指标？每个是什么意思？
 
@@ -162,53 +162,57 @@ IoU = 正确选中的像素数 /（正确选中的像素数 + 多选的像素数
 
 ### 5.5 分割耗时：真实使用要等多久？
 
-统一记录 `DensePartition.segment()` 调用前后的墙钟时间，输出秒/图，包括当前实现的模型加载、子进程开销、推理和分区后处理，不包括结果保存、评测与绘图。已有 `metadata.segment_seconds` 的计时范围略窄，第一版由评测入口统一计时。
+统一记录 `DensePartition.segment(rgb)` 调用前后的墙钟时间，输出秒/图，包括当前实现的模型加载、子进程开销、推理和分区后处理，不包括输入文件读取、结果保存、评测与绘图。已有 `metadata.segment_seconds` 的计时范围略窄，由评测入口另行统一计时。
 
 所有方法在相同机器条件下依次运行，记录设备和配置；SLIC 使用 CPU。现有学习模型每张图都会重新加载，耗时表必须注明这个运行方式。
 
 ## 6. 最后输出哪些文件？
 
-建议统一输出到一个新的目录。下列文件是拟定格式，数字示例不代表实测结果。
+统一输出到一个新目录，默认目录名带时间戳。下列文件已实现，数字示例仅用于说明格式，不代表实测结果。
 
 ```text
-outputs/umd_benchmark/<run_id>/
+outputs/affordance_benchmark_<年月日_时分秒_微秒>/
   manifest.json              # 本次实际使用的图片清单
   run.json                   # 参数快照、版本、设备、标注核实依据、失败记录
   image_metrics.csv          # 每张图、每种方法的 K 和耗时
   scores.csv                 # 每张图、每种方法、每个功能的质量分数
   summary.csv                # 按方法、Tools/Clutter 汇总的结果表
   per_class.csv              # grasp、cut 等七类分别的结果
+  per_sequence.csv           # 按工具实例/Clutter 场景、功能分别统计
   index.html                 # 评测对照页面
   partitions/<sample_id>/<method>/
     labels.npy               # 沿用现有分区导出
     metadata.json            # 沿用现有配置、来源和统计
     ...                      # 现有原图、Mask、可视化等文件
-  evaluations/<sample_id>/<method>/grasp/
-    gt.png                   # 真实区域，0/255 二值图
-    oracle.png               # 最优组合区域，0/255 二值图
-    valid.png                # 参与评价的像素为 255，忽略像素为 0
-    selected_regions.json    # 例如 {"region_ids": [3, 5, 8]}
+  evaluations/<sample_id>/<method>/
+    points.json              # 区域 ID 与 [x,y] 代表点坐标
+    grasp/
+      gt.png                 # 真实区域，0/255 二值图
+      oracle.png             # 最优组合区域，0/255 二值图
+      valid.png              # 参与评价的像素为 255，忽略像素为 0
+      errors.png             # 绿=正确覆盖，红=多选，蓝=漏选，灰=忽略
+      selected_regions.json  # 例如 {"region_ids": [3, 5, 8]}
 ```
 
 `image_metrics.csv` 每张图、每种方法只有一行，避免一张图出现多个功能时重复统计耗时：
 
 ```csv
-sample_id,subset,sequence_id,method,region_count,wall_seconds
-example_001,tools,example_tool,mosa,100,8.2
+sample_id,subset,sequence_id,method,region_count,wall_seconds,valid_pixels,ignored_pixels,ignored_fraction
+example_001,tools,example_tool,mosa,100,8.2,307200,0,0.0
 ```
 
 `scores.csv` 每行是一张图、一个方法、一个功能的结果：
 
 ```csv
-sample_id,subset,sequence_id,method,affordance_id,affordance,oracle_iou,success_080,gt_components,hit_components,point_hit_rate
-example_001,tools,example_tool,mosa,1,grasp,0.88,1,3,2,0.666667
+sample_id,subset,sequence_id,method,affordance_id,affordance,oracle_iou,success_080,gt_components,hit_components,point_hit_rate,gt_pixels,true_positive_pixels,false_positive_pixels,false_negative_pixels,selected_region_count
+example_001,tools,example_tool,mosa,1,grasp,0.88,1,3,2,0.666667,100,88,0,12,3
 ```
 
 页面按 **原图 → 功能 GT → 方法分区 → 最优组合 → 多选/漏选像素** 展示，同时显示代表点和分数。这样能看到“是功能边界混在一起，还是区域太碎，还是点没有落进去”。
 
 ## 7. 数据怎样选，分数怎样汇总？
 
-第一版采用以下固定规则：
+输入与计分采用以下规则；正式集的规模是建议，实际样本由清单决定，脚本不自动抽样：
 
 | 项目 | 规则 |
 | --- | --- |
@@ -223,7 +227,7 @@ example_001,tools,example_tool,mosa,1,grasp,0.88,1,3,2,0.666667
 
 人工/自动标注的区别来自 [UMD 官方说明](https://users.umiacs.umd.edu/~fermulcm/affordance/part-affordance-dataset/README.txt)。本地图片数量、原始划分位置和 `-1` 检查记录见 [UMD 本地数据说明](../data/umd/README.md)。上述抽样及忽略规则是本项目的评测约定。
 
-Tools 与 Clutter 分成两张汇总表。每种方法、每个功能先在同一实例内对有效帧取平均，再对实例取平均，最后对七个功能等权平均；Clutter 将“实例”换成“场景”，还要给出三个场景的单独成绩。点命中率和达标比例采用相同汇总方式。某类没有有效样本时记为缺失，不补 0 或 1。
+Tools 与 Clutter 在汇总表中分开记录。每种方法、每个功能先在同一实例内对有效帧取平均，再对实例取平均，最后对有有效样本的功能类别等权平均；Clutter 将“实例”换成“场景”，单场景成绩保存在 `per_sequence.csv`。点命中率和达标比例采用相同汇总方式。某类没有有效样本时记为缺失，不补 0 或 1，`class_count` 记录实际覆盖了七类中的几类。
 
 K 和耗时按图片统计，先在实例/场景内平均，再对实例/场景等权平均，不按功能类别重复计算。
 
@@ -238,11 +242,42 @@ K 和耗时按图片统计，先在实例/场景内平均，再对实例/场景�
 | MoSA | 待测 | 待测 | 待测 | 待测 | 待测 |
 | SLIC | 待测 | 待测 | 待测 | 待测 | 待测 |
 
-## 8. 准备按什么顺序实现？
+## 8. 怎样运行？
 
-1. **准备清单与 GT 读取。** 核实人工标注帧、图片配对和有效像素规则，固定开发集与测试集。
-2. **复用现有分割接口。** 逐图运行六种方法，保存最终分区、配置和耗时。已有结果只有图片与配置完全匹配时才可复用；旧结果没有统一墙钟计时则留空。
-3. **实现评测器。** 读取最终分区和 GT，计算最优组合 IoU、达标比例、K、代表点命中率，生成 CSV。
-4. **生成对照页面并跑正式集。** 先用 debug 图核对分数和图像，再运行固定测试清单。
+激活仓库 README 中的 `systemone-affordance` 环境后，在仓库根目录执行：
 
-第一轮每种方法只用一份冻结配置，先得到可复现的对比表。之后再在开发集上选择粗、中、细几组参数，在同一测试集画“区域数 K—IoU”曲线，判断质量提升是否值得增加区域数量。
+```bash
+# 默认五张 debug 图，全部六种方法
+python affordance_benchmark.py
+
+# 只运行 SLIC，快速检查完整流程
+python affordance_benchmark.py --method slic
+
+# 指定 UMD 图片，自动寻找同目录标签；支持多张图片，仍默认为全部方法
+python affordance_benchmark.py --image data/umd/tools/knife_01/knife_01_00000122_rgb.jpg
+
+# 自定义清单；混合 dev/test 清单必须指定其中一组
+python affordance_benchmark.py --manifest benchmarks/umd/manifest.json --split test
+
+# 自定义输出目录，目录必须尚不存在
+python affordance_benchmark.py --method mosa slic --output outputs/umd_mosa_slic
+```
+
+`--image`、`--debug` 和 `--manifest` 互斥。没有指定输入时用 `config.DEBUG_IMAGES`；没有指定 `--method` 时跑六种方法。默认和 `--image` 均标记为开发评测。两个脚本直接执行即可跑完全部方法：`python dense_partition.py` 自动输出到 `outputs/dense_partition_时间戳/`，`python affordance_benchmark.py` 自动输出到 `outputs/affordance_benchmark_时间戳/`。输出根目录由 `config.OUTPUT_DIR` 控制，时间戳精确到微秒，重复运行生成新目录；`--output` 只是可选覆盖项。
+
+Python 接口：
+
+```python
+from affordance_benchmark import AffordanceBenchmark
+
+benchmark = AffordanceBenchmark.create("umd")
+manifest = benchmark.development_manifest()
+run = benchmark.run(manifest, "outputs/my_umd_benchmark")  # 全部方法
+
+# 已有分区和同尺寸 GT 时，可只计算质量，不重新推理
+evaluation = benchmark.evaluate(labels, gt)
+```
+
+本版完整运行每次重新分割，不自动复用旧目录；输出目录不能覆盖。个别任务失败时会记录异常并继续其他方法，`run.json` 标记为 `incomplete`，命令退出码为 1；未完成的方法/子集不计算汇总质量与成本，保留成功的逐图明细。Ctrl+C 会保存已有分数和页面，并标记为 `interrupted`。
+
+后续扩展是核实并固定正式测试清单，以及在开发集上选择粗、中、细几组参数，画“区域数 K—IoU”曲线。这两项不影响当前 debug 评测入口使用。

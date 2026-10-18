@@ -1,11 +1,12 @@
 # SystemOneAffordance
 
-当前只实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+、Semantic-SAM、PartGLEE RN50、MoSA R50 和 SLIC，统一通过 `DensePartition` 接口调用。
+当前实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）** 及其 **UMD Affordance 分区评测**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+、Semantic-SAM、PartGLEE RN50、MoSA R50 和 SLIC，统一通过 `DensePartition` 接口调用。评测器使用 UMD 标签评价这些区域的表达能力，尚未接入任务决策模型。
 
 ## 代码结构
 
 ```text
 dense_partition.py     # 抽象基类、六种实现、统一工厂及命令行入口
+affordance_benchmark.py # 评测基类、UMD 实现、指标、CSV/页面导出及命令行入口
 config.py              # 日常调节项、设备、debug 图片
 common/
   partition.py         # 解重叠、补齐区域、连通域、小区域合并、验证
@@ -27,6 +28,7 @@ tests/test_semantic_sam.py
 tests/test_small_regions.py
 tests/test_partglee.py
 tests/test_mosa.py
+tests/test_affordance_benchmark.py
 docs/
 environment.yml
 requirements.txt
@@ -40,7 +42,7 @@ requirements-mosa.txt
 
 所有模型由 `common/models.py` 统一通过当前 Conda Python 启动短生命周期子进程。PartGLEE 和 MoSA 的适配实现分别位于 `common/partglee.py`、`common/mosa.py`；Semantic-SAM 的尺寸还原和兼容处理在 `common/models.py` 内完成。本项目使用 `common` 包名，与上游包可以同时导入。
 
-旧 `configs/` 目录、完整 D 流程、Valen 判断、取点、任务指令和 GT 评估代码已经移除。历史实验保留在 `docs/` 和本地 `outputs/`；旧实现可从 Git 提交 `3d62972` 查看。数据、模型、输出不纳入 Git。
+旧 `configs/` 目录、完整 D 流程、Valen 判断、任务指令和旧评估代码已经移除。当前 benchmark 单独实现分区评测及代表点命中统计。历史实验保留在 `docs/` 和本地 `outputs/`；旧实现可从 Git 提交 `3d62972` 查看。数据、模型、输出不纳入 Git。
 
 ## Miniconda 环境
 
@@ -127,7 +129,7 @@ python scripts/download_unsamv2.py
 | `MOSA.mask_nms_thresh` | 默认 `0.95`，按 Mask IoU 去除高度重复候选；`1` 关闭，显著更小的嵌套部件保留 |
 | `SLIC` | `n_segments` 越大越细；`compactness` 控制形状规则性，`sigma` 控制平滑；目标数不等于最终 Mask 数 |
 | `DEBUG_IMAGES` | 5 张不同的 debug 图片，只有图片路径，不包含任务指令或标注 |
-| `OUTPUT_DIR` | 默认 `outputs/dense_partition` |
+| `OUTPUT_DIR` | 两个脚本共用的输出根目录，默认 `outputs/`；每次自动创建“脚本名_时间戳”子目录 |
 
 SAM 2.1 直接使用官方自动生成器默认值。UnSAMv2+ 独立使用上述三个控制项，其余采样设置参考 [官方 HF Demo 源码](https://huggingface.co/spaces/yujunwei04/UnSAMv2/blob/675a2bceabf284b69d5d537a3aa798b53c50a8ff/app.py)，不再与 SAM 共用一组生成参数。模型资源与内部设置在 `common/settings.py`；`model_config='configs/…yaml'` 是第三方包内部资源路径。
 
@@ -178,27 +180,27 @@ result = DensePartition.create("slic", config=settings).segment("your_image.jpg"
 
 ```bash
 # 默认使用 config.DEBUG_IMAGES，对比全部六种方法
-python dense_partition.py --output outputs/partition_comparison
+python dense_partition.py
 
 # 指定单图，默认对比全部六种方法
-python dense_partition.py --image your_image.jpg --output outputs/one_image
+python dense_partition.py --image your_image.jpg
 
 # 只运行 Semantic-SAM，粒度在 config.py 的 SEMANTIC_SAM.level 中调节
-python dense_partition.py --method semantic-sam --output outputs/semantic_sam_run
+python dense_partition.py --method semantic-sam
 
 # PartGLEE：整图多物体和部件候选，无需提供类别或指令
-python dense_partition.py --method partglee --output outputs/partglee_run
+python dense_partition.py --method partglee
 
 # MoSA：单张 RGB 自动产生整图无类别候选，支持多物体
-python dense_partition.py --method mosa --output outputs/mosa_run
+python dense_partition.py --method mosa
 
 # 只运行 SLIC；也支持 --image 后面指定多张图片
-python dense_partition.py --method slic --output outputs/slic_debug
+python dense_partition.py --method slic
 ```
 
 不指定 `--image` 时默认读取 `config.DEBUG_IMAGES`；不指定 `--method` 时运行全部方法（SAM 2.1、UnSAMv2+、Semantic-SAM、PartGLEE、MoSA、SLIC）。`--debug` 仍可显式使用，与 `--image` 互斥。
 
-输出目录必须尚不存在，防止覆盖旧结果。打开输出目录中的 `index.html`，可切换图片、查看原尺寸，点击像素查看各方法对应的最终 Mask，并下载二值 PNG。
+不传 `--output` 时，自动创建 `outputs/dense_partition_年月日_时分秒_微秒/`，连续运行会产生不同目录。`--output` 仅在需要自定义路径时使用，指定目录必须尚不存在。打开输出目录中的 `index.html`，可切换图片、查看原尺寸，点击像素查看各方法对应的最终 Mask，并下载二值 PNG。
 
 页面每个方法占一行，固定按 **Original → Raw colors → Boundaries → Colors → Overlay** 展示：原图、原始候选纯色图、最终分区边界图、最终分区纯色图、最终分区叠加图。每行只保留 Raw / Final Mask 数量和选中区域信息；详细统计在 `summary.json` 中。`overview.jpg` 按图片、方法逐行排列，每行使用相同的五列顺序；单个方法的 `comparison.jpg` 也采用此顺序。
 
@@ -249,6 +251,34 @@ for proposal_id, mask in iter_masks("<模型分区目录>/raw_masks.npz"):
 
 全覆盖是输出结构保证，不能作为分割准确率；模型漏覆盖区域补齐后也不代表模型识别出了这些区域。当前不进行模型与 SLIC 求交细分，六种方法各自独立输出。
 
+## UMD Affordance 分区评测
+
+激活同一个 Conda 环境后运行：
+
+```bash
+# 默认五张 debug 图、全部六种方法；自动创建带时间戳的输出目录
+python affordance_benchmark.py
+
+# 指定 UMD 图片，自动配对同目录的 *_label.mat，默认全部方法
+python affordance_benchmark.py --image data/umd/tools/knife_01/knife_01_00000122_rgb.jpg
+
+# 只用 SLIC 快速检查，仍自动创建输出目录
+python affordance_benchmark.py --method slic
+
+# 按固定清单运行正式测试；清单需要人工标注身份和核实依据
+python affordance_benchmark.py --manifest benchmarks/umd/manifest.json --split test
+```
+
+`AffordanceBenchmark` 是抽象基类，`UMDBenchmark` 读取 UMD `gt_label`。评测逻辑集中在 `affordance_benchmark.py`，六种后端继续复用 `DensePartition`。Python 可调用 `benchmark = AffordanceBenchmark.create('umd')`，然后调用 `benchmark.evaluate(labels, gt)` 评估已有分区，或 `benchmark.run(manifest, output, methods=None)` 执行完整流程；`methods=None` 默认全部方法。
+
+五项指标为最优区域组合的 Oracle IoU、IoU ≥ 0.8 的比例、最终区域数 K、代表点命中率和每图分割耗时。多个碎片可以合并成一个功能部位；分区和代表点生成都不读取 GT。`-1` 像素按本项目约定忽略，背景参与误选惩罚，不存在的功能类别跳过。Tools 和 Clutter 分开统计，按帧、实例/场景、有效功能类别分层平均。
+
+结果自动保存在 `outputs/affordance_benchmark_年月日_时分秒_微秒/`，无需传入 `--output`：`index.html` 可切换图片和功能、查看原尺寸与代表点；`summary.csv`、`per_class.csv`、`per_sequence.csv`、`scores.csv`、`image_metrics.csv` 分别保存汇总与明细；`run.json` 保存实际配置、版本、耗时口径和失败记录；`manifest.json` 保存输入路径、哈希和标签信息。每次分割都保存原始候选、最终分区和各功能的 GT/最优组合/误差图。当前每次运行重新分割，不自动复用旧结果。
+
+默认 debug 和 `--image` 都是开发评测，标注身份记为 `unknown`。正式清单需将样本标记为 `test`、`manual`，并填写非空 `annotation_evidence`；程序记录用户提供的依据，不自动判定哪些帧为人工标注。混合 dev/test 清单必须用 `--split` 选择，Tools 同一实例不能跨两组。运行中的个别方法失败后继续其他任务，记录失败并返回非零退出码；未完成的方法/子集汇总分数留空，逐图成功结果仍保留。格式与指标解释见 [06：UMD 分割评价](docs/06_umd_affordance_partition_benchmark.md)。
+
+本次验证通过 50 项单元/集成测试，包括最优组合与穷举结果一致、忽略像素、分组平均、失败记录及两个入口无参数连续运行。五张真实 debug 图、六种方法共 30 次分割全部成功，78 条功能评分的导出 Mask 与 CSV IoU 已独立回读核验。查看 [开发集评测页面](outputs/umd_benchmark/debug_all_v1/index.html) / [汇总表](outputs/umd_benchmark/debug_all_v1/summary.csv)。该小样本仅验证实现，未覆盖全部七类，不能作为正式性能排名。
+
 ## 检查与研究记录
 
 ```bash
@@ -277,4 +307,4 @@ python -m unittest discover -s tests -v
 
 本次五图在 RTX 4090 D、`cuda:1` 上运行，默认短边 1024、FP32；模型推理及候选尺寸还原约 1.35–2.33 秒/图，worker 总耗时约 5.59–9.18 秒/图，峰值 CUDA 张量分配约 10.78 GiB。该内存统计不包含其他进程或 CUDA 保留内存，实际耗时会随图像和设备负载变化。可视化中工具的部分局部区域被分开，背景细分也较多；尚未进行带匿名部件标注的准确率评测，候选数或覆盖率不能证明优于其他方法。
 
-研究资料见 [文档导航](docs/README.md)。历史 A、C、D 实验方案见 [最小 Affordance 决策测试](docs/04_minimal_affordance_test.md)；任务范式、数据集与后续研究方向见 [2D Affordance 深度调研](docs/00_SystemOne_2DAffordance_深度调研.md)；六种分割方法的评测计划见 [UMD 分割评价方案](docs/06_umd_affordance_partition_benchmark.md)。当前实现的架构、用法与验证记录以本 README 为准。
+研究资料见 [文档导航](docs/README.md)。历史 A、C、D 实验方案见 [最小 Affordance 决策测试](docs/04_minimal_affordance_test.md)；任务范式、数据集与后续研究方向见 [2D Affordance 深度调研](docs/00_SystemOne_2DAffordance_深度调研.md)；六种分割方法的评测流程与指标见 [UMD 分割评价方案](docs/06_umd_affordance_partition_benchmark.md)。当前实现的架构、用法与验证记录以本 README 为准。

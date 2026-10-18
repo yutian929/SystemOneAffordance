@@ -77,9 +77,10 @@ class MoSATest(unittest.TestCase):
 
     def test_invalid_configuration_and_independent_controls(self):
         settings = get_config('mosa')
+        original_max_masks = settings['generator']['max_masks']
         engine = DensePartition.create('mosa', settings)
         settings['generator']['max_masks'] = 5
-        self.assertEqual(engine.config['generator']['max_masks'], 1000)
+        self.assertEqual(engine.config['generator']['max_masks'], original_max_masks)
         self.assertNotIn('categories', engine.config['generator'])
         for section, key, value in [('generator', 'max_masks', 2001),
                                     ('generator', 'max_masks', True),
