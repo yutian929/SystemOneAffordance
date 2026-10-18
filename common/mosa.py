@@ -11,7 +11,7 @@ import types
 
 import numpy as np
 
-from common.io import file_digest, write_json
+from common.io import file_digest
 from common.settings import (MOSA_CODE_REVISION, MOSA_WEIGHT_REVISION,
                              MOSA_CHECKPOINT_SHA256, MOSA_DETECTRON_REVISION)
 
@@ -160,7 +160,7 @@ def _import_inference_modules(branch):
     return model_module, config_module.add_maskformer2_config
 
 
-def run_worker(request):
+def load_predictor(request):
     from PIL import Image
     import torch
 
@@ -219,42 +219,45 @@ def run_worker(request):
     torch.cuda.synchronize()
     load_seconds = time.perf_counter() - start
 
-    rgb = np.load(directory / 'image.npy', allow_pickle=False)
-    preprocess = settings['preprocess']
-    resized = ResizeShortestEdge(preprocess['short_edge'], preprocess['max_size']).get_transform(
-        rgb).apply_image(rgb)
-    tensor = torch.as_tensor(np.ascontiguousarray(resized.transpose(2, 0, 1)),
-                             device=runtime['device'], dtype=torch.float32)
-    torch.cuda.reset_peak_memory_stats()
-    start = time.perf_counter()
-    with torch.inference_mode():
-        images = ImageList.from_tensors([(tensor - model.pixel_mean) / model.pixel_std],
-                                       model.size_divisibility)
-        outputs = model.sem_seg_head(model.backbone(images.tensor))
-        if len(outputs['pred_logits'][0]) != generator['num_queries']:
-            raise ValueError('MoSA returned an unexpected number of queries')
-        masks, records = restore_proposals(
-            outputs['pred_logits'][0], outputs['pred_masks'][0], images.tensor.shape[-2:],
-            images.image_sizes[0], rgb.shape[:2], generator['max_masks'], generator['mask_batch_size'])
-    torch.cuda.synchronize()
-    generate_seconds = time.perf_counter() - start
-    start = time.perf_counter()
-    masks, records, filtering = select_proposals(masks, records, generator['score_thresh'],
-                                                generator['mask_nms_thresh'])
-    filter_seconds = time.perf_counter() - start
-    np.savez_compressed(directory / 'masks.npz', masks=masks)
-    write_json(directory / 'result.json', dict(
-        records=records, generator=generator, filtering=filtering,
-        load_seconds=load_seconds, generate_seconds=generate_seconds, filter_seconds=filter_seconds,
-        code_revision=MOSA_CODE_REVISION, weight_revision=MOSA_WEIGHT_REVISION,
-        detectron_revision=MOSA_DETECTRON_REVISION, model_type=resources['model_type'],
-        device=runtime['device'], precision=runtime['precision'],
-        input_shape=list(resized.shape[:2]), padded_shape=list(images.tensor.shape[-2:]),
-        original_shape=list(rgb.shape[:2]), mask_resize='bilinear_logits_then_threshold_zero',
-        score_definition='softmax(foreground_logit) * mean(sigmoid(mask_logit) inside mask)',
-        topk_definition='foreground_class_probability_before_mask_quality',
-        attention_backend='upstream_pytorch_reference',
-        peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
-        python_executable=sys.executable, torch_version=torch.__version__,
-        mosa_module=str(Path(mosa.__file__).resolve()),
-        detectron2_module=str(Path(detectron2.__file__).resolve())))
+    del state
+
+    def predict(rgb):
+        preprocess = settings['preprocess']
+        resized = ResizeShortestEdge(preprocess['short_edge'], preprocess['max_size']).get_transform(
+            rgb).apply_image(rgb)
+        tensor = torch.as_tensor(np.ascontiguousarray(resized.transpose(2, 0, 1)),
+                                 device=runtime['device'], dtype=torch.float32)
+        torch.cuda.reset_peak_memory_stats()
+        start = time.perf_counter()
+        with torch.inference_mode():
+            images = ImageList.from_tensors([(tensor - model.pixel_mean) / model.pixel_std],
+                                           model.size_divisibility)
+            outputs = model.sem_seg_head(model.backbone(images.tensor))
+            if len(outputs['pred_logits'][0]) != generator['num_queries']:
+                raise ValueError('MoSA returned an unexpected number of queries')
+            masks, records = restore_proposals(
+                outputs['pred_logits'][0], outputs['pred_masks'][0], images.tensor.shape[-2:],
+                images.image_sizes[0], rgb.shape[:2], generator['max_masks'], generator['mask_batch_size'])
+        torch.cuda.synchronize()
+        generate_seconds = time.perf_counter() - start
+        start = time.perf_counter()
+        masks, records, filtering = select_proposals(masks, records, generator['score_thresh'],
+                                                    generator['mask_nms_thresh'])
+        filter_seconds = time.perf_counter() - start
+        return masks, records, dict(
+            generator=generator, filtering=filtering,
+            generate_seconds=generate_seconds, filter_seconds=filter_seconds,
+            code_revision=MOSA_CODE_REVISION, weight_revision=MOSA_WEIGHT_REVISION,
+            detectron_revision=MOSA_DETECTRON_REVISION, model_type=resources['model_type'],
+            device=runtime['device'], precision=runtime['precision'],
+            input_shape=list(resized.shape[:2]), padded_shape=list(images.tensor.shape[-2:]),
+            original_shape=list(rgb.shape[:2]), mask_resize='bilinear_logits_then_threshold_zero',
+            score_definition='softmax(foreground_logit) * mean(sigmoid(mask_logit) inside mask)',
+            topk_definition='foreground_class_probability_before_mask_quality',
+            attention_backend='upstream_pytorch_reference',
+            peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
+            python_executable=sys.executable, torch_version=torch.__version__,
+            mosa_module=str(Path(mosa.__file__).resolve()),
+            detectron2_module=str(Path(detectron2.__file__).resolve()))
+
+    return predict, dict(model_load_seconds=load_seconds, generator=generator)

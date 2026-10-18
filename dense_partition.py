@@ -26,10 +26,40 @@ class DensePartition(ABC):
     def __init__(self, config=None):
         self._config = deepcopy(get_config(self.method) if config is None else config)
         validate_config(self._config, self.method)
+        self._worker = None
+        self._initialization = None
 
     @property
     def config(self):
         return deepcopy(self._config)
+
+    def start(self):
+        """Load once, outside per-image timing. SLIC has no model to load."""
+        if self._initialization is None:
+            if self.method == 'slic':
+                self._initialization = dict(startup_seconds=0., model_load_seconds=0.)
+            else:
+                from common.models import ProposalWorker
+                self._worker = ProposalWorker(self._config)
+                self._initialization = self._worker.start()
+                self._config['generator'] = self._initialization['generator']
+        return deepcopy(self._initialization)
+
+    def close(self):
+        """Release this model before loading another one; safe to call repeatedly."""
+        try:
+            if self._worker is not None:
+                self._worker.close()
+        finally:
+            self._worker = None
+            self._initialization = None
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     @staticmethod
     def create(method=DEFAULT_METHOD, config=None):
@@ -43,6 +73,7 @@ class DensePartition(ABC):
     @final
     def segment(self, image) -> PartitionResult:
         rgb = read_image(image)
+        self.start()
         start = time.perf_counter()
         labels, owners, details, raw = self._segment_rgb(rgb)
         if labels.shape != rgb.shape[:2]:
@@ -50,6 +81,7 @@ class DensePartition(ABC):
         labels, postprocess = merge_small_regions(labels, self._config['postprocess']['min_mask_area'])
         return PartitionResult(labels, rgb, {
             **details, 'postprocess': postprocess, 'method': self.method, 'config': self.config,
+            'initialization': deepcopy(self._initialization),
             'image_sha256': image_digest(rgb), 'shape': list(rgb.shape[:2]),
             'segment_seconds': time.perf_counter() - start,
         }, owners, raw)
@@ -59,8 +91,7 @@ class DensePartition(ABC):
         """Return (labels, optional proposal owners, metadata, raw masks/labels)."""
 
     def _segment_with_proposals(self, rgb):
-        from common.models import generate_proposals
-        masks, records, backend = generate_proposals(rgb, self._config)
+        masks, records, backend = self._worker.generate(rgb)
         self._config['generator'] = backend['generator']
         labels, owners, stats = resolve_masks(masks, records, rgb.shape[:2])
         return labels, owners, {**stats, 'backend': backend, 'raw_proposals': records}, masks
@@ -137,27 +168,36 @@ if __name__ == '__main__':
     output = (args.output or OUTPUT_DIR / f"dense_partition_{datetime.now():%Y%m%d_%H%M%S_%f}").expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Put the per-method configuration snapshot before potentially long image results.
-    summary = {'completed': False, 'methods': methods,
-               'config': {name: engine.config for name, engine in engines.items()}, 'images': []}
+    summary = {'completed': False, 'methods': methods, 'initialization': {},
+               'config': {name: engine.config for name, engine in engines.items()},
+               'images': [{'name': path.stem, 'key': key, 'source': str(path.resolve()), 'results': {}}
+                          for path, rgb, key in images]}
     write_json(output / 'summary.json', summary)
-    for path, rgb, key in images:
-        row = {'name': path.stem, 'key': key, 'source': str(path.resolve()), 'results': {}}
-        for method, engine in engines.items():
-            print(f'{path.name}: {METHOD_NAMES[method]} ...', flush=True)
-            result = engine.segment(rgb)
-            summary['config'][method] = result.metadata['config']
-            relative = Path('partitions') / key / method
-            result.save(output / relative)
-            metadata = json.loads((output / relative / 'metadata.json').read_text())
-            row['results'][method] = {
-                'directory': relative.as_posix(), **result.validate(),
-                'raw_coverage_fraction': result.metadata['raw_coverage_fraction'],
-                'raw_output': metadata['raw_output'],
-                'segment_seconds': result.metadata['segment_seconds'],
-            }
-            print(f'  {result.region_count} masks; coverage=100%; overlap=0; exported masks verified', flush=True)
-        summary['images'].append(row)
-        write_json(output / 'summary.json', summary)
+    for method, engine in engines.items():
+        print(f'{METHOD_NAMES[method]}: initializing once ...', flush=True)
+        try:
+            summary['initialization'][method] = engine.start()
+            summary['config'][method] = engine.config
+            write_json(output / 'summary.json', summary)
+            print(f"  startup: {summary['initialization'][method]['startup_seconds']:.2f} s", flush=True)
+            for (path, rgb, key), row in zip(images, summary['images']):
+                print(f'{path.name}: {METHOD_NAMES[method]} ...', flush=True)
+                result = engine.segment(rgb)
+                relative = Path('partitions') / key / method
+                result.save(output / relative)
+                metadata = json.loads((output / relative / 'metadata.json').read_text())
+                row['results'][method] = {
+                    'directory': relative.as_posix(), **result.validate(),
+                    'raw_coverage_fraction': result.metadata['raw_coverage_fraction'],
+                    'raw_output': metadata['raw_output'],
+                    'segment_seconds': result.metadata['segment_seconds'],
+                }
+                print(f'  {result.region_count} masks; {result.metadata["segment_seconds"]:.2f} s; '
+                      'coverage=100%; overlap=0; exported masks verified', flush=True)
+                write_json(output / 'summary.json', summary)
+                del result
+        finally:
+            engine.close()
     write_overview(output, summary)
     write_viewer(output, summary)
     summary['completed'] = True

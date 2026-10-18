@@ -1,12 +1,16 @@
-"""Short-lived model workers: no GPU or fork imports in the calling process."""
+"""One resident worker per model; upstream/GPU imports stay in the child."""
+from copy import deepcopy
 import json
 import os
+import random
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import types
+import traceback
+import weakref
 
 import numpy as np
 from PIL import Image
@@ -81,39 +85,179 @@ def checkpoint_info(settings):
     return directory / model['checkpoint_name'], source
 
 
-def generate_proposals(rgb, settings):
-    """Isolate upstream packages and release CUDA memory after each image."""
-    checkpoint, source = checkpoint_info(settings)
-    if settings['method'] == 'unsamv2-plus':
-        validate_source(settings['model']['code_dir'])
-    semantic = settings['method'] == 'semantic-sam'
-    if semantic:
-        validate_semantic_source(settings['model'])
-    start = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix='dense_partition_') as temporary:
-        directory = Path(temporary)
-        np.save(directory / 'image.npy', rgb, allow_pickle=False)
-        write_json(directory / 'request.json', {
-            'settings': settings, 'checkpoint': checkpoint, 'directory': directory})
-        env = os.environ.copy()
-        env.pop('PYTHONPATH', None)
-        env['PYTHONNOUSERSITE'] = env['PYTHONDONTWRITEBYTECODE'] = '1'
-        process = subprocess.run(
-            [sys.executable, '-m', 'common.models', str(directory / 'request.json')],
-            cwd=ROOT, env=env, capture_output=True, text=True)
-        if process.returncode:
-            raise RuntimeError(f"{settings['method']} inference failed:\n{process.stderr[-6000:]}")
-        report = json.loads((directory / 'result.json').read_text())
-        with np.load(directory / 'masks.npz', allow_pickle=False) as archive:
-            masks = archive['masks']
-    records = report.pop('records')
-    report.update(checkpoint_source=source, worker_wall_seconds=time.perf_counter() - start)
-    if semantic:
-        report.update(code_revision=SEMANTIC_SAM_CODE_REVISION,
-                      detectron_revision=SEMANTIC_SAM_DETECTRON_REVISION)
-    if process.stdout or process.stderr:
-        report['worker_log'] = process.stdout + process.stderr
-    return masks, records, report
+def _close_worker(process, replies, log, temporary):
+    """Reap the child before deleting its workspace, including on interruption."""
+    try:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    finally:
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass  # A request may still be buffered when the child crashes.
+        finally:
+            replies.close()
+            log.close()
+            temporary.cleanup()
+
+
+class ProposalWorker:
+    """Sequential requests to one model. Explicit close/context manager releases CUDA."""
+    def __init__(self, settings):
+        self.settings = deepcopy(settings)
+        self._cleanup = None
+        self.initialization = None
+
+    def start(self):
+        if self._cleanup is not None:
+            if self.process.poll() is not None:
+                raise RuntimeError('Model worker exited; close it before starting a new session')
+            return deepcopy(self.initialization)
+        start = time.perf_counter()
+        checkpoint, self.source = checkpoint_info(self.settings)
+        if self.settings['method'] == 'unsamv2-plus':
+            validate_source(self.settings['model']['code_dir'])
+        if self.settings['method'] == 'semantic-sam':
+            validate_semantic_source(self.settings['model'])
+        temporary = tempfile.TemporaryDirectory(prefix='dense_partition_')
+        self.directory = Path(temporary.name)
+        read_fd, write_fd = os.pipe()
+        replies = os.fdopen(read_fd, 'r', encoding='utf-8')
+        log = (self.directory / 'worker.log').open('w+b')
+        try:
+            write_json(self.directory / 'request.json', dict(
+                settings=self.settings, checkpoint=checkpoint, directory=self.directory))
+            env = os.environ.copy()
+            env.pop('PYTHONPATH', None)
+            env['PYTHONNOUSERSITE'] = env['PYTHONDONTWRITEBYTECODE'] = '1'
+            self.process = subprocess.Popen(
+                [sys.executable, '-m', 'common.models', str(self.directory / 'request.json'), str(write_fd)],
+                cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=log, stderr=log,
+                text=True, pass_fds=(write_fd,))
+        except BaseException:
+            replies.close()
+            log.close()
+            temporary.cleanup()
+            raise
+        finally:
+            os.close(write_fd)
+        self.replies, self.log = replies, log
+        self._cleanup = weakref.finalize(self, _close_worker, self.process, replies, log, temporary)
+        try:
+            self._receive()
+            self.initialization = json.loads((self.directory / 'initialization.json').read_text())
+            self.initialization.update(startup_seconds=time.perf_counter() - start,
+                                       worker_pid=self.process.pid)
+        except BaseException:
+            self.close()
+            raise
+        return deepcopy(self.initialization)
+
+    def _receive(self):
+        line = self.replies.readline()
+        if not line:
+            raise RuntimeError(f"{self.settings['method']} worker exited unexpectedly:\n{self._log_tail()}")
+        response = json.loads(line)
+        if response['status'] != 'ok':
+            raise RuntimeError(f"{self.settings['method']} worker failed:\n{response['error']}")
+        return response
+
+    def _log_tail(self):
+        # Bounded reads even for long benchmark runs with verbose upstream logs.
+        with (self.directory / 'worker.log').open('rb') as stream:
+            size = stream.seek(0, 2)
+            stream.seek(max(0, size - 6000))
+            return stream.read().decode('utf-8', errors='replace')
+
+    def generate(self, rgb):
+        self.start()
+        start = time.perf_counter()
+        np.save(self.directory / 'image.npy', rgb, allow_pickle=False)
+        try:
+            self.process.stdin.write('generate\n')
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as error:
+            raise RuntimeError(f'Model worker is unavailable:\n{self._log_tail()}') from error
+        response = self._receive()
+        report = json.loads((self.directory / 'result.json').read_text())
+        masks = np.load(self.directory / 'masks.npy', allow_pickle=False)
+        records = report.pop('records')
+        report.update(checkpoint_source=self.source, worker_pid=self.process.pid,
+                      image_index=response['image_index'],
+                      worker_wall_seconds=time.perf_counter() - start, worker_log=self._log_tail())
+        return masks, records, report
+
+    def close(self):
+        if self._cleanup is not None:
+            try:
+                self._cleanup()
+            finally:
+                self._cleanup = None
+                self.initialization = None
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def load_predictor(request):
+    method = request['settings']['method']
+    if method == 'mosa':
+        from common.mosa import load_predictor as load
+    elif method == 'partglee':
+        from common.partglee import load_predictor as load
+    else:
+        load = _load_semantic if method == 'semantic-sam' else _load_sam
+    return load(request)
+
+
+def _worker(request_path, reply_fd):
+    # Dedicated response pipe: upstream stdout/stderr remain ordinary log output.
+    with os.fdopen(reply_fd, 'w', encoding='utf-8', buffering=1) as replies:
+        def send(**message):
+            replies.write(json.dumps(message) + '\n')
+
+        try:
+            request = json.loads(Path(request_path).read_text())
+            directory = Path(request['directory'])
+            predict, initialization = load_predictor(request)
+            import torch
+            device = request['settings']['runtime']['device']
+            cuda = device.startswith('cuda')
+            # Each image starts from the same post-load RNG state as a fresh worker.
+            cpu_rng, numpy_rng, python_rng = torch.get_rng_state(), np.random.get_state(), random.getstate()
+            cuda_rng = torch.cuda.get_rng_state(device) if cuda else None
+            write_json(directory / 'initialization.json', initialization)
+            send(status='ok')
+        except Exception:
+            send(status='error', error=traceback.format_exc())
+            return
+        for index, command in enumerate(sys.stdin, 1):
+            try:
+                if command.strip() != 'generate':
+                    raise ValueError('Unknown worker command')
+                torch.set_rng_state(cpu_rng)
+                np.random.set_state(numpy_rng)
+                random.setstate(python_rng)
+                if cuda:
+                    torch.cuda.set_rng_state(cuda_rng, device)
+                rgb = np.load(directory / 'image.npy', allow_pickle=False)
+                masks, records, report = predict(rgb)
+                # IPC avoids compression; permanent exports keep their packed format.
+                np.save(directory / 'masks.npy', masks, allow_pickle=False)
+                write_json(directory / 'result.json', dict(records=records, **report))
+                del rgb, masks, records, report
+                send(status='ok', image_index=index)
+            except Exception:
+                send(status='error', error=traceback.format_exc())
 
 
 def resize_semantic_rgb(rgb, short_edge):
@@ -180,7 +324,7 @@ def _use_semantic_pytorch_attention():
     sys.modules[module.__name__] = module
 
 
-def _semantic_worker(request):
+def _load_semantic(request):
     """Use upstream's utils package alongside the project's common package."""
     settings = request['settings']
     resources, runtime = settings['model'], settings['runtime']
@@ -221,41 +365,32 @@ def _semantic_worker(request):
     generator_config = {**default_arguments(SemanticSamAutomaticMaskGenerator), **settings['generator']}
     torch.cuda.synchronize()
     load_seconds = time.perf_counter() - start
-    rgb = np.load(directory / 'image.npy', allow_pickle=False)
-    resized = resize_semantic_rgb(rgb, settings['preprocess']['input_size'])
-    tensor = torch.from_numpy(resized).permute(2, 0, 1).to(runtime['device'])
-    start = time.perf_counter()
-    with torch.inference_mode(), torch.autocast(
-            'cuda', dtype=torch.bfloat16, enabled=runtime['precision'] == 'bfloat16'):
-        proposals = generator.generate(tensor)
-    torch.cuda.synchronize()
-    generate_seconds = time.perf_counter() - start
-    masks, records = restore_semantic_proposals(proposals, resized.shape[:2], rgb.shape[:2])
-    np.savez_compressed(directory / 'masks.npz', masks=masks)
-    report = dict(records=records, load_seconds=load_seconds, generate_seconds=generate_seconds,
-                  generator=generator_config, device=runtime['device'], precision=runtime['precision'],
-                  model_type=resources['model_type'], input_shape=list(resized.shape[:2]),
-                  original_shape=list(rgb.shape[:2]), mask_resize='nearest',
-                  attention_backend='upstream_pytorch_reference',
-                  semantic_sam_module=str(Path(semantic_sam.__file__).resolve()),
-                  python_executable=sys.executable, torch_version=torch.__version__)
-    write_json(directory / 'result.json', report)
+
+    def predict(rgb):
+        resized = resize_semantic_rgb(rgb, settings['preprocess']['input_size'])
+        tensor = torch.from_numpy(resized).permute(2, 0, 1).to(runtime['device'])
+        start = time.perf_counter()
+        with torch.inference_mode(), torch.autocast(
+                'cuda', dtype=torch.bfloat16, enabled=runtime['precision'] == 'bfloat16'):
+            proposals = generator.generate(tensor)
+        torch.cuda.synchronize()
+        generate_seconds = time.perf_counter() - start
+        masks, records = restore_semantic_proposals(proposals, resized.shape[:2], rgb.shape[:2])
+        return masks, records, dict(generate_seconds=generate_seconds,
+                      code_revision=SEMANTIC_SAM_CODE_REVISION,
+                      detectron_revision=SEMANTIC_SAM_DETECTRON_REVISION,
+                      generator=generator_config, device=runtime['device'], precision=runtime['precision'],
+                      model_type=resources['model_type'], input_shape=list(resized.shape[:2]),
+                      original_shape=list(rgb.shape[:2]), mask_resize='nearest',
+                      attention_backend='upstream_pytorch_reference',
+                      semantic_sam_module=str(Path(semantic_sam.__file__).resolve()),
+                      python_executable=sys.executable, torch_version=torch.__version__)
+
+    return predict, dict(model_load_seconds=load_seconds, generator=generator_config)
 
 
-def _worker(request_path):
-    request = json.loads(Path(request_path).read_text())
+def _load_sam(request):
     settings = request['settings']
-    if settings['method'] == 'mosa':
-        from common.mosa import run_worker
-        run_worker(request)
-        return
-    if settings['method'] == 'partglee':
-        from common.partglee import run_worker
-        run_worker(request)
-        return
-    if settings['method'] == 'semantic-sam':
-        _semantic_worker(request)
-        return
     model_config, runtime = settings['model'], settings['runtime']
     unsam = settings['method'] == 'unsamv2-plus'
     if unsam:
@@ -287,29 +422,30 @@ def _worker(request_path):
     generator_config = {**default_arguments(SAM2AutomaticMaskGenerator), **settings['generator']}
     synchronize()
     load_seconds = time.perf_counter() - start
-    directory = Path(request['directory'])
-    rgb = np.load(directory / 'image.npy', allow_pickle=False)
-    start = time.perf_counter()
-    with torch.inference_mode(), torch.autocast(
-            'cuda', dtype=torch.bfloat16, enabled=cuda and runtime['precision'] == 'bfloat16'):
-        # The fork consumes gra on generate(), not its constructor's granularity field.
-        proposals = generator.generate(rgb, gra=model_config['granularity']) if unsam else generator.generate(rgb)
-    synchronize()
-    generate_seconds = time.perf_counter() - start
-    masks = np.stack([p['segmentation'] for p in proposals]) if proposals else np.zeros(
-        (0, *rgb.shape[:2]), dtype=bool)
-    np.savez_compressed(directory / 'masks.npz', masks=masks)
-    records = [{key: value for key, value in proposal.items() if key != 'segmentation'}
-               for proposal in proposals]
-    write_json(directory / 'result.json', {
-        'records': records, 'load_seconds': load_seconds, 'generate_seconds': generate_seconds,
-        'generator': generator_config,
-        'device': device, 'precision': runtime['precision'] if cuda else 'float32',
-        'code_revision': UNSAM_CODE_REVISION if unsam else None,
-        'sam2_module': str(Path(sam2.__file__).resolve()),
-        'python_executable': sys.executable, 'torch_version': torch.__version__,
-    })
+
+    def predict(rgb):
+        start = time.perf_counter()
+        with torch.inference_mode(), torch.autocast(
+                'cuda', dtype=torch.bfloat16, enabled=cuda and runtime['precision'] == 'bfloat16'):
+            # The fork consumes gra on generate(), not its constructor's granularity field.
+            proposals = generator.generate(rgb, gra=model_config['granularity']) if unsam else generator.generate(rgb)
+        synchronize()
+        generate_seconds = time.perf_counter() - start
+        masks = np.stack([p['segmentation'] for p in proposals]) if proposals else np.zeros(
+            (0, *rgb.shape[:2]), dtype=bool)
+        records = [{key: value for key, value in proposal.items() if key != 'segmentation'}
+                   for proposal in proposals]
+        return masks, records, {
+            'generate_seconds': generate_seconds,
+            'generator': generator_config,
+            'device': device, 'precision': runtime['precision'] if cuda else 'float32',
+            'code_revision': UNSAM_CODE_REVISION if unsam else None,
+            'sam2_module': str(Path(sam2.__file__).resolve()),
+            'python_executable': sys.executable, 'torch_version': torch.__version__,
+        }
+
+    return predict, dict(model_load_seconds=load_seconds, generator=generator_config)
 
 
 if __name__ == '__main__':
-    _worker(sys.argv[1])
+    _worker(sys.argv[1], int(sys.argv[2]))

@@ -159,7 +159,9 @@ class CommonAPITest(unittest.TestCase):
             settings = get_config(method)
             settings['postprocess']['min_mask_area'] = 0  # Inspect overlap resolution before merging.
             backend = {'generator': settings['generator']}
-            with patch('common.models.generate_proposals', return_value=(masks, records, backend)):
+            with patch('common.models.ProposalWorker.start', return_value=dict(
+                    startup_seconds=1., model_load_seconds=.5, generator={})), \
+                    patch('common.models.ProposalWorker.generate', return_value=(masks, records, backend)):
                 result = DensePartition.create(method, settings).segment(rgb)
             self.assertEqual(result.owners[3, 4], 2)
             self.assertEqual(result.owners[0, 0], 0)
@@ -179,7 +181,9 @@ class CommonAPITest(unittest.TestCase):
                 self.assertAlmostEqual(metadata['raw_output']['overlap_fraction'], 6 / 72)
                 for name in ('raw_overlay.png', 'raw_boundaries.png', 'raw_coverage.png', 'comparison.jpg'):
                     self.assertTrue((directory / name).is_file(), name)
-            with patch('common.models.generate_proposals', return_value=(np.zeros((0, 8, 9), bool), [], backend)):
+            with patch('common.models.ProposalWorker.start', return_value=dict(
+                    startup_seconds=1., model_load_seconds=.5, generator={})), \
+                    patch('common.models.ProposalWorker.generate', return_value=(np.zeros((0, 8, 9), bool), [], backend)):
                 empty = DensePartition.create(method, settings).segment(rgb)
             self.assertEqual(empty.region_count, 1)
             self.assertEqual(empty.metadata['raw_coverage_fraction'], 0)
@@ -243,7 +247,9 @@ runpy.run_path('dense_partition.py', run_name='__main__')
             proposals = (np.ones((1, 12, 17), bool), [dict(score=1.)], {'generator': {}})
             with patch('config.DEBUG_IMAGES', (path,)), patch('config.OUTPUT_DIR', directory / 'outputs'), \
                     patch('sys.argv', ['dense_partition.py']), \
-                    patch('common.models.generate_proposals', return_value=proposals) as worker:
+                    patch('common.models.ProposalWorker.start', return_value=dict(
+                        startup_seconds=1., model_load_seconds=.5, generator={})), \
+                    patch('common.models.ProposalWorker.generate', return_value=proposals) as worker:
                 for _ in range(2):
                     runpy.run_path(str(Path(__file__).resolve().parents[1] / 'dense_partition.py'), run_name='__main__')
             outputs = list((directory / 'outputs').iterdir())
@@ -255,6 +261,53 @@ runpy.run_path('dense_partition.py', run_name='__main__')
                 self.assertTrue(report['completed'])
                 self.assertEqual(report['methods'], list(METHOD_NAMES))
                 self.assertEqual(set(report['images'][0]['results']), set(METHOD_NAMES))
+
+    def test_cli_finishes_each_model_before_loading_next_and_closes_on_error(self):
+        events, active = [], set()
+        test = self
+
+        class Worker:
+            def __init__(self, settings):
+                self.method = settings['method']
+
+            def start(self):
+                test.assertFalse(active)
+                active.add(self.method)
+                events.append((self.method, 'start'))
+                return dict(startup_seconds=2., model_load_seconds=1., generator={})
+
+            def generate(self, rgb):
+                events.append((self.method, 'generate'))
+                test.assertEqual(active, {self.method})
+                if fail:
+                    raise RuntimeError('fixture inference failure')
+                return np.ones((1, *rgb.shape[:2]), bool), [dict(score=1.)], {'generator': {}}
+
+            def close(self):
+                events.append((self.method, 'close'))
+                active.discard(self.method)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            paths = [directory / 'one.png', directory / 'two.png']
+            for value, path in zip((0, 255), paths):
+                Image.fromarray(np.full((12, 17, 3), value, np.uint8)).save(path)
+            for fail in (False, True):
+                events.clear()
+                args = ['dense_partition.py', '--image', *map(str, paths), '--method', 'sam2', 'mosa',
+                        '--output', str(directory / str(fail))]
+                with patch('sys.argv', args), patch('common.models.ProposalWorker', Worker):
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, 'fixture inference failure'):
+                            runpy.run_path(str(Path(__file__).resolve().parents[1] / 'dense_partition.py'),
+                                           run_name='__main__')
+                        self.assertEqual(events, [('sam2', 'start'), ('sam2', 'generate'), ('sam2', 'close')])
+                    else:
+                        runpy.run_path(str(Path(__file__).resolve().parents[1] / 'dense_partition.py'),
+                                       run_name='__main__')
+                        self.assertEqual(events, [(method, event) for method in ('sam2', 'mosa')
+                                                  for event in ('start', 'generate', 'generate', 'close')])
+                self.assertFalse(active)
 
 
 

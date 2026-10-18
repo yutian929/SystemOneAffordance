@@ -84,7 +84,8 @@ SAM2 / UnSAMv2+ / Semantic-SAM / PartGLEE / MoSA / SLIC
 继续使用当前接口：
 
 ```python
-result = DensePartition.create("mosa").segment(rgb_path)
+with DensePartition.create("mosa") as segmenter:
+    result = segmenter.segment(rgb_path)  # 同一个 segmenter 可连续分割多张图
 labels = result.labels
 ```
 
@@ -162,9 +163,19 @@ IoU = 正确选中的像素数 /（正确选中的像素数 + 多选的像素数
 
 ### 5.5 分割耗时：真实使用要等多久？
 
-统一记录 `DensePartition.segment(rgb)` 调用前后的墙钟时间，输出秒/图，包括当前实现的模型加载、子进程开销、推理和分区后处理，不包括输入文件读取、结果保存、评测与绘图。已有 `metadata.segment_seconds` 的计时范围略窄，由评测入口另行统一计时。
+现在的运行顺序是：加载模型 A → 处理全部图片 → 释放模型 A → 加载模型 B → 处理全部图片。每种学习模型只有一个独立进程、一份驻留权重，不再每张图重新加载；同一时间只保留当前模型，避免多个大模型同时占用显存。SLIC 使用 CPU，没有权重加载。
 
-所有方法在相同机器条件下依次运行，记录设备和配置；SLIC 使用 CPU。现有学习模型每张图都会重新加载，耗时表必须注明这个运行方式。
+耗时分开记录：
+
+| 字段 | 含义 | 保存位置 |
+|---|---|---|
+| `startup_seconds` | 每种模型只发生一次的准备时间，包括权重校验、启动进程、导入依赖、构建和加载模型 | `run.json.initialization.<方法名>` |
+| `model_load_seconds` | 上述准备时间中，构建模型、加载权重并移到设备所花的时间；它是子项，不要再与准备时间相加 | 同上 |
+| `wall_seconds` | 模型准备好后，一张图从调用 `segment(rgb)` 到拿到最终分区的时间，包括数据传递、推理、后处理和验证 | `image_metrics.csv` |
+
+图片文件读取、结果保存、GT 评测和绘图都不计入单张分割耗时。`summary.csv.mean_wall_seconds` 按实例/场景汇总这些单张时间。分割结果中的 `metadata.segment_seconds` 从读取 RGB、初始化之后开始计时，范围略窄；benchmark 用外层调用统一计时。模型内部生成候选的时间另存于 `metadata.backend.generate_seconds`，其范围由对应后端定义。
+
+所有方法在相同机器条件下依次运行，并保存设备和配置。没有额外预热，首张图的推理时间也计入结果；它可能比后续图片慢。耗时协议版本为 2，旧版包含每张图重新加载的耗时不能直接混入本版比较。页面分别显示一次性准备时间和分割秒/图。模型初始化失败时一次记录该方法全部图片失败，并继续下一个方法；单图失败后继续其余图片，退出或中断时释放进程。
 
 ## 6. 最后输出哪些文件？
 
@@ -173,7 +184,7 @@ IoU = 正确选中的像素数 /（正确选中的像素数 + 多选的像素数
 ```text
 outputs/affordance_benchmark_<年月日_时分秒_微秒>/
   manifest.json              # 本次实际使用的图片清单
-  run.json                   # 参数快照、版本、设备、标注核实依据、失败记录
+  run.json                   # 参数快照、版本、设备、一次性初始化耗时、标注依据、失败记录
   image_metrics.csv          # 每张图、每种方法的 K 和耗时
   scores.csv                 # 每张图、每种方法、每个功能的质量分数
   summary.csv                # 按方法、Tools/Clutter 汇总的结果表

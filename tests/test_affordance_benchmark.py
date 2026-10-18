@@ -262,6 +262,12 @@ class BenchmarkTest(unittest.TestCase):
         class FailedBackend:
             config = {'method': 'mosa'}
 
+            def start(self):
+                return dict(startup_seconds=0., model_load_seconds=0.)
+
+            def close(self):
+                pass
+
             def segment(self, rgb):
                 raise RuntimeError('intentional fixture failure')
 
@@ -281,6 +287,75 @@ class BenchmarkTest(unittest.TestCase):
             self.assertEqual(rows[0]['failure_rate'], '1.0')
             self.assertEqual(rows[1]['status'], 'complete')
             self.assertIn('intentional fixture failure', (directory / 'out/index.html').read_text())
+
+    def test_model_order_and_cleanup_after_initialization_failure_or_interrupt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            manifest, _ = self.make_sample(directory)
+            second_dir = directory / 'second'
+            second_dir.mkdir()
+            second, _ = self.make_sample(second_dir)
+            sample = second['samples'][0]
+            sample['sample_id'] = 'second'
+            # Distinct input contents, same geometry and annotations.
+            Image.fromarray(np.full((12, 17, 3), 100, np.uint8)).save(sample['rgb'])
+            manifest['samples'].append(sample)
+            for mode in ('complete', 'initialize', 'interrupt'):
+                events, active = [], set()
+
+                class TrackedEngine:
+                    def __init__(self, name):
+                        self.name = name
+                        self.inner = DensePartition.create('slic')
+                        self.config = self.inner.config
+
+                    def start(self):
+                        self_test.assertFalse(active)
+                        active.add(self.name)
+                        events.append((self.name, 'start'))
+                        if mode == 'initialize' and self.name == 'mosa':
+                            raise RuntimeError('fixture initialization failure')
+                        return dict(startup_seconds=100., model_load_seconds=90.)
+
+                    def segment(self, rgb):
+                        events.append((self.name, 'segment'))
+                        self_test.assertEqual(active, {self.name})
+                        if mode == 'interrupt':
+                            raise KeyboardInterrupt
+                        return self.inner.segment(rgb)
+
+                    def close(self):
+                        events.append((self.name, 'close'))
+                        active.discard(self.name)
+                        self.inner.close()
+
+                self_test = self
+                engines = {name: TrackedEngine(name) for name in ('mosa', 'slic')}
+                output = directory / mode
+                with self.subTest(mode=mode), patch('affordance_benchmark.DensePartition.create',
+                                                   side_effect=engines.__getitem__):
+                    if mode == 'interrupt':
+                        with self.assertRaises(KeyboardInterrupt):
+                            UMDBenchmark().run(manifest, output, list(engines))
+                        report = json.loads((output / 'run.json').read_text())
+                        self.assertEqual(report['status'], 'interrupted')
+                        self.assertEqual(events, [('mosa', 'start'), ('mosa', 'segment'), ('mosa', 'close')])
+                    else:
+                        report = UMDBenchmark().run(manifest, output, list(engines))
+                        expected = [('mosa', 'start')]
+                        if mode == 'complete':
+                            expected += [('mosa', 'segment')] * 2
+                        expected += [('mosa', 'close'), ('slic', 'start'),
+                                     ('slic', 'segment'), ('slic', 'segment'), ('slic', 'close')]
+                        self.assertEqual(events, expected)
+                        if mode == 'initialize':
+                            self.assertEqual(len(report['failures']), 2)
+                            self.assertTrue(all(f['stage'] == 'initialize' for f in report['failures']))
+                            self.assertEqual(report['successful_jobs'], 2)
+                        rows = list(csv.DictReader((output / 'image_metrics.csv').read_text().splitlines()))
+                        self.assertTrue(all(float(r['wall_seconds']) < 100. for r in rows))
+                    self.assertFalse(active)
+                    self.assertTrue((output / 'index.html').is_file())
 
 
 if __name__ == '__main__':

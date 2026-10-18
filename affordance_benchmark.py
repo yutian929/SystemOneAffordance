@@ -311,16 +311,20 @@ class AffordanceBenchmark(ABC):
         run = dict(dataset=self.dataset, split=samples[0]['split'], status='running', completed=False,
                    started_at=datetime.now(timezone.utc).isoformat(), methods=methods,
                    config={name: engine.config for name, engine in engines.items()},
-                   provenance=_provenance(), failures=[], successful_jobs=0,
+                   provenance=_provenance(), initialization={}, failures=[], successful_jobs=0,
                    expected_jobs=len(samples) * len(methods),
-                   protocol=dict(version=1, ignore_label=self.ignore_label, background_label=0,
+                   protocol=dict(version=2, ignore_label=self.ignore_label, background_label=0,
                        success_iou=0.8, connectivity=4, absent_class='skip',
                        aggregation='frame mean -> sequence mean -> observed class macro mean',
                        incomplete_groups='summary values blank; individual rows retained',
-                       timing='wall time of segment(rgb), including worker/load/postprocess; excludes IO/export/evaluation',
-                       model_lifetime='a new worker and model load for each image',
+                       timing='wall time of segment(rgb) after start(); includes IPC/inference/postprocess; excludes startup/file IO/export/evaluation',
+                       startup_timing='one-time validation/imports/worker/model load; model_load_seconds is a subset',
+                       warmup='none; first-image inference is included',
+                       model_lifetime='one resident worker per method; all images then close before next method',
                        input='RGB only; most-likely affordance GT used exclusively for evaluation'))
-        images, scores, views = [], [], []
+        images, scores = [], []
+        views = [dict(sample_id=s['sample_id'], subset=s['subset'], shape=s['shape'],
+                      affordance_ids=s['affordance_ids'], results={}) for s in samples]
 
         def persist():
             summary, classes, sequences = aggregate_metrics(samples, methods, images, scores, self.class_names)
@@ -334,54 +338,68 @@ class AffordanceBenchmark(ABC):
 
         persist()
         try:
-            for sample in samples:
-                view = dict(sample_id=sample['sample_id'], subset=sample['subset'],
-                            shape=sample['shape'], affordance_ids=sample['affordance_ids'], results={})
-                views.append(view)
-                for method, engine in engines.items():
-                    print(f"{sample['sample_id']}: {METHOD_NAMES[method]} ...", flush=True)
-                    stage = 'input'
+            for method, engine in engines.items():
+                print(f'{METHOD_NAMES[method]}: initializing once ...', flush=True)
+                try:
                     try:
-                        rgb = read_image(sample['rgb'])
-                        gt = self.load_ground_truth(sample, rgb.shape[:2])
-                        if (image_digest(rgb) != sample['image_sha256']
-                                or file_digest(sample['label']) != sample['label_sha256']):
-                            raise ValueError('Input changed since preflight')
-                        stage = 'segment'
-                        start = time.perf_counter()
-                        result = engine.segment(rgb)
-                        wall_seconds = time.perf_counter() - start
-                        run['config'][method] = result.metadata['config']
-                        stage = 'evaluate'
-                        evaluation = self.evaluate(result.labels, gt)
-                        stage = 'export'
-                        partition = Path('partitions') / sample['sample_id'] / method
-                        result.save(output / partition)
-                        directory = Path('evaluations') / sample['sample_id'] / method
-                        self._save_evaluation(output / directory, result, gt, evaluation)
-                        identity = dict(sample_id=sample['sample_id'], subset=sample['subset'],
-                                        sequence_id=sample['sequence_id'], method=method)
-                        images.append({**identity, 'region_count': result.region_count,
-                                       'wall_seconds': wall_seconds,
-                                       **{key: evaluation[key] for key in
-                                          ('valid_pixels', 'ignored_pixels', 'ignored_fraction')}})
-                        scores.extend({**identity, **row} for row in evaluation['scores'])
-                        view['results'][method] = dict(partition=partition.as_posix(),
-                            evaluation=directory.as_posix(), region_count=result.region_count,
-                            wall_seconds=wall_seconds, points=evaluation['points'],
-                            scores=evaluation['scores'], ignored_fraction=evaluation['ignored_fraction'])
-                        run['successful_jobs'] += 1
-                        print(f"  {result.region_count} regions; {len(evaluation['scores'])} affordances; "
-                              f'{wall_seconds:.2f} s', flush=True)
-                        del result
+                        run['initialization'][method] = engine.start()
+                        run['config'][method] = engine.config
+                        print(f"  startup: {run['initialization'][method]['startup_seconds']:.2f} s", flush=True)
                     except Exception as error:
-                        failure = dict(sample_id=sample['sample_id'], method=method, stage=stage,
-                                       error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
-                        run['failures'].append(failure)
-                        view['results'][method] = {'error': failure['error']}
-                        print(f"  FAILED ({stage}): {failure['error']}", file=sys.stderr, flush=True)
-                    write_json(output / 'run.json', run)
-                persist()
+                        failure = dict(method=method, stage='initialize',
+                            error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
+                        for sample, view in zip(samples, views):
+                            run['failures'].append(dict(sample_id=sample['sample_id'], **failure))
+                            view['results'][method] = {'error': failure['error']}
+                        print(f"  FAILED (initialize): {failure['error']}", file=sys.stderr, flush=True)
+                        persist()
+                        continue
+                    persist()
+                    for sample, view in zip(samples, views):
+                        print(f"{sample['sample_id']}: {METHOD_NAMES[method]} ...", flush=True)
+                        stage = 'input'
+                        try:
+                            rgb = read_image(sample['rgb'])
+                            gt = self.load_ground_truth(sample, rgb.shape[:2])
+                            if (image_digest(rgb) != sample['image_sha256']
+                                    or file_digest(sample['label']) != sample['label_sha256']):
+                                raise ValueError('Input changed since preflight')
+                            stage = 'segment'
+                            start = time.perf_counter()
+                            result = engine.segment(rgb)
+                            wall_seconds = time.perf_counter() - start
+                            run['config'][method] = result.metadata['config']
+                            stage = 'evaluate'
+                            evaluation = self.evaluate(result.labels, gt)
+                            stage = 'export'
+                            partition = Path('partitions') / sample['sample_id'] / method
+                            result.save(output / partition)
+                            directory = Path('evaluations') / sample['sample_id'] / method
+                            self._save_evaluation(output / directory, result, gt, evaluation)
+                            identity = dict(sample_id=sample['sample_id'], subset=sample['subset'],
+                                            sequence_id=sample['sequence_id'], method=method)
+                            images.append({**identity, 'region_count': result.region_count,
+                                           'wall_seconds': wall_seconds,
+                                           **{key: evaluation[key] for key in
+                                              ('valid_pixels', 'ignored_pixels', 'ignored_fraction')}})
+                            scores.extend({**identity, **row} for row in evaluation['scores'])
+                            view['results'][method] = dict(partition=partition.as_posix(),
+                                evaluation=directory.as_posix(), region_count=result.region_count,
+                                wall_seconds=wall_seconds, points=evaluation['points'],
+                                scores=evaluation['scores'], ignored_fraction=evaluation['ignored_fraction'])
+                            run['successful_jobs'] += 1
+                            print(f"  {result.region_count} regions; {len(evaluation['scores'])} affordances; "
+                                  f'{wall_seconds:.2f} s', flush=True)
+                            del result
+                        except Exception as error:
+                            failure = dict(sample_id=sample['sample_id'], method=method, stage=stage,
+                                           error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
+                            run['failures'].append(failure)
+                            view['results'][method] = {'error': failure['error']}
+                            print(f"  FAILED ({stage}): {failure['error']}", file=sys.stderr, flush=True)
+                        persist()
+                finally:
+                    engine.close()
             run['completed'] = not run['failures']
             run['status'] = 'complete' if run['completed'] else 'incomplete'
         except BaseException:
@@ -445,7 +463,8 @@ class UMDBenchmark(AffordanceBenchmark):
 def write_benchmark_viewer(output, run, summary, views, class_names):
     """Local file:// viewer: embedded scores/points, relative images, no fetch/server."""
     data = dict(methods={m: METHOD_NAMES[m] for m in run['methods']}, classes=class_names,
-                split=run['split'], status=run['status'], summary=summary, images=views)
+                split=run['split'], status=run['status'], summary=summary, images=views,
+                initialization=run['initialization'])
     page = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>UMD Affordance Benchmark</title>
 <style>
@@ -459,18 +478,22 @@ select,button{font:inherit;padding:6px}a{color:#365c9a}section{background:white;
 .note{color:#5b6473;line-height:1.6}.error{color:#b00020}nav{display:flex;gap:16px;flex-wrap:wrap}
 </style><h1>UMD Affordance Benchmark</h1><p id="status"></p>
 <p class="note">Oracle IoU 使用 GT 选择最佳区域组合，表示分区的表达能力。评估只使用有效像素；空白分数表示缺失或未完成。
-汇总按帧 → 实例/场景 → 有效功能类别等权平均。类别覆盖数列用于识别不同统计范围。</p>
+汇总按帧 → 实例/场景 → 有效功能类别等权平均。类别覆盖数列用于识别不同统计范围。
+每种方法只初始化一次；分割耗时不含初始化、结果保存和评测，包含首张图片的推理，无额外预热。</p>
 <nav><a href="summary.csv">汇总 CSV</a><a href="per_class.csv">分类别 CSV</a><a href="per_sequence.csv">分实例/场景 CSV</a>
 <a href="scores.csv">逐图质量 CSV</a><a href="image_metrics.csv">区域数与耗时</a><a href="run.json">配置与失败记录</a><a href="manifest.json">图片清单</a></nav>
-<div class="scroll" id="summary"></div><header>
+<div class="scroll" id="initialization"></div><div class="scroll" id="summary"></div><header>
 <label>图片 <select id="image"></select></label><label>功能 <select id="class"></select></label>
 <label><input id="points" type="checkbox" checked>显示代表点</label><label><input id="full" type="checkbox">原尺寸</label></header>
 <p class="note">误差图：绿色 = 正确覆盖，红色 = 多选，蓝色 = 漏选，灰色 = 忽略。代表点由分区产生；功能 GT 只用于评价。</p><main id="results"></main>
 <script>
 const DATA=__DATA__,byId=id=>document.getElementById(id),fmt=v=>v==null?'—':Number(v).toFixed(3);
 byId('status').textContent=(DATA.split==='dev'?'开发/调试集（非正式测试成绩）':'固定测试集')+' · '+DATA.status;
+const init=document.createElement('table'),initHead=init.insertRow();
+['方法','首次启动（秒，仅一次）','其中模型加载（秒）'].forEach(x=>{const th=document.createElement('th');th.textContent=x;initHead.append(th);});
+Object.entries(DATA.methods).forEach(([method,title])=>{const r=DATA.initialization[method]||{},tr=init.insertRow();[title,fmt(r.startup_seconds),fmt(r.model_load_seconds)].forEach(x=>{tr.insertCell().textContent=x;});});byId('initialization').append(init);
 const table=document.createElement('table'),head=table.insertRow();
-['子集','方法','状态','完成图片','功能类别','Oracle IoU ↑','0.8 达标率 ↑','K','点命中率 ↑','秒/图 ↓'].forEach(x=>{const th=document.createElement('th');th.textContent=x;head.append(th);});
+['子集','方法','状态','完成图片','功能类别','Oracle IoU ↑','0.8 达标率 ↑','K','点命中率 ↑','分割秒/图 ↓'].forEach(x=>{const th=document.createElement('th');th.textContent=x;head.append(th);});
 DATA.summary.forEach(r=>{const tr=table.insertRow();[r.subset,DATA.methods[r.method],r.status,r.completed_images+'/'+r.expected_images,r.class_count+'/'+Object.keys(DATA.classes).length,fmt(r.mean_oracle_iou),fmt(r.success_rate_080),fmt(r.mean_region_count),fmt(r.mean_point_hit_rate),fmt(r.mean_wall_seconds)].forEach(x=>{tr.insertCell().textContent=x;});});byId('summary').append(table);
 DATA.images.forEach((im,i)=>byId('image').add(new Option(im.sample_id+' · '+im.subset,i)));
 function render(){

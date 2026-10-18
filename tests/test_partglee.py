@@ -84,7 +84,9 @@ class PartGLEETest(unittest.TestCase):
         settings = get_config('partglee')
         settings['postprocess']['min_mask_area'] = 0
         backend = dict(generator=settings['generator'], filtering=stats)
-        with patch('common.models.generate_proposals', return_value=(masks, records, backend)):
+        with patch('common.models.ProposalWorker.start', return_value=dict(
+                    startup_seconds=1., model_load_seconds=.5, generator={})), \
+                    patch('common.models.ProposalWorker.generate', return_value=(masks, records, backend)):
             result = DensePartition.create('partglee', settings).segment(rgb)
         self.assertTrue(np.all(result.masks.sum(axis=0) == 1))
         self.assertTrue(result.validate()['all_regions_connected'])

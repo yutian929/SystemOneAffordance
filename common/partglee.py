@@ -17,7 +17,7 @@ import types
 
 import numpy as np
 
-from common.io import file_digest, write_json
+from common.io import file_digest
 from common.settings import (PARTGLEE_CODE_REVISION, PARTGLEE_CHECKPOINT_SHA256,
                              PARTGLEE_CLIP_REVISION, PARTGLEE_CLIP_SHA256)
 
@@ -162,7 +162,7 @@ def _import_inference_modules(code):
     return config_module.add_partglee_config, model_module
 
 
-def run_worker(request):
+def load_predictor(request):
     from PIL import Image
     import torch
     import torch.nn.functional as F
@@ -224,58 +224,61 @@ def run_worker(request):
     torch.cuda.synchronize()
     load_seconds = time.perf_counter() - start
 
-    rgb = np.load(directory / 'image.npy', allow_pickle=False)
-    size = settings['preprocess']['input_size']
-    resized = ResizeShortestEdge(size, size).get_transform(rgb).apply_image(rgb)
-    tensor = torch.as_tensor(np.ascontiguousarray(resized.transpose(2, 0, 1)),
-                             device=runtime['device'], dtype=torch.float32)
-    start = time.perf_counter()
-    masks, records = [], []
-    with torch.inference_mode():
-        images = model.preprocess_image([{'image': tensor}], task)
-        outputs = core(images, {}, task, batch_name_list=generator['categories'], is_train=False)
-        # Consume each selected query once, rather than the upstream flattened
-        # query x category topk (which can duplicate queries and selects zero scores).
-        class_scores = outputs['pred_logits'][0].sigmoid().max(dim=-1).values
-        logits = outputs['pred_masks'][0]
-        for offset in range(0, len(logits), 16):
-            restored = F.interpolate(logits[None, offset:offset + 16],
-                                     size=images.tensor.shape[-2:], mode='bilinear',
-                                     align_corners=False)[0]
-            restored = sem_seg_postprocess(restored, images.image_sizes[0], *rgb.shape[:2])
-            binary = restored > 0
-            areas = binary.flatten(1).sum(1)
-            mask_scores = (restored.sigmoid() * binary).flatten(1).sum(1) / (areas + 1e-6)
-            batch_masks = binary.cpu().numpy()
-            for local, mask in enumerate(batch_masks):
-                index = offset + local
-                class_score = float(class_scores[index])
-                mask_score = float(mask_scores[local])
-                ys, xs = np.nonzero(mask)
-                # Hierarchical outputs concatenate object queries then part queries.
-                # This remains unambiguous even when sigmoid underflows to zero.
-                kind = 'object' if index < generator['max_object_masks'] else 'part'
-                records.append(dict(source_index=index, kind=kind,
-                                    score=class_score * mask_score, class_score=class_score,
-                                    mask_score=mask_score, area=int(areas[local]),
-                                    bbox=([int(xs.min()), int(ys.min()), int(xs.max() - xs.min()),
-                                           int(ys.max() - ys.min())] if len(xs) else [0, 0, 0, 0])))
-                masks.append(mask)
-    torch.cuda.synchronize()
-    generate_seconds = time.perf_counter() - start
-    masks = np.stack(masks) if masks else np.zeros((0, *rgb.shape[:2]), dtype=bool)
-    masks, records, filtering = select_proposals(masks, records, generator['score_thresh'],
-                                                generator['mask_nms_thresh'])
-    np.savez_compressed(directory / 'masks.npz', masks=masks)
-    write_json(directory / 'result.json', dict(
-        records=records, generator=generator, filtering=filtering,
-        load_seconds=load_seconds, generate_seconds=generate_seconds,
-        code_revision=PARTGLEE_CODE_REVISION, clip_revision=PARTGLEE_CLIP_REVISION,
-        model_type='RN50', device=runtime['device'], precision=runtime['precision'],
-        input_shape=list(resized.shape[:2]), original_shape=list(rgb.shape[:2]),
-        mask_resize='bilinear_logits_then_threshold_zero',
-        score_definition='sigmoid(class_logit) * mean(sigmoid(mask_logit) inside mask)',
-        attention_backend='upstream_pytorch_reference', ignored_training_keys=len(ignored),
-        python_executable=sys.executable, torch_version=torch.__version__,
-        partglee_module=str(Path(partglee.__file__).resolve()),
-        detectron2_module=str(Path(detectron2.__file__).resolve())))
+    del state
+
+    def predict(rgb):
+        size = settings['preprocess']['input_size']
+        resized = ResizeShortestEdge(size, size).get_transform(rgb).apply_image(rgb)
+        tensor = torch.as_tensor(np.ascontiguousarray(resized.transpose(2, 0, 1)),
+                                 device=runtime['device'], dtype=torch.float32)
+        start = time.perf_counter()
+        masks, records = [], []
+        with torch.inference_mode():
+            images = model.preprocess_image([{'image': tensor}], task)
+            outputs = core(images, {}, task, batch_name_list=generator['categories'], is_train=False)
+            # Consume each selected query once, rather than the upstream flattened
+            # query x category topk (which can duplicate queries and selects zero scores).
+            class_scores = outputs['pred_logits'][0].sigmoid().max(dim=-1).values
+            logits = outputs['pred_masks'][0]
+            for offset in range(0, len(logits), 16):
+                restored = F.interpolate(logits[None, offset:offset + 16],
+                                         size=images.tensor.shape[-2:], mode='bilinear',
+                                         align_corners=False)[0]
+                restored = sem_seg_postprocess(restored, images.image_sizes[0], *rgb.shape[:2])
+                binary = restored > 0
+                areas = binary.flatten(1).sum(1)
+                mask_scores = (restored.sigmoid() * binary).flatten(1).sum(1) / (areas + 1e-6)
+                batch_masks = binary.cpu().numpy()
+                for local, mask in enumerate(batch_masks):
+                    index = offset + local
+                    class_score = float(class_scores[index])
+                    mask_score = float(mask_scores[local])
+                    ys, xs = np.nonzero(mask)
+                    # Hierarchical outputs concatenate object queries then part queries.
+                    # This remains unambiguous even when sigmoid underflows to zero.
+                    kind = 'object' if index < generator['max_object_masks'] else 'part'
+                    records.append(dict(source_index=index, kind=kind,
+                                        score=class_score * mask_score, class_score=class_score,
+                                        mask_score=mask_score, area=int(areas[local]),
+                                        bbox=([int(xs.min()), int(ys.min()), int(xs.max() - xs.min()),
+                                               int(ys.max() - ys.min())] if len(xs) else [0, 0, 0, 0])))
+                    masks.append(mask)
+        torch.cuda.synchronize()
+        generate_seconds = time.perf_counter() - start
+        masks = np.stack(masks) if masks else np.zeros((0, *rgb.shape[:2]), dtype=bool)
+        masks, records, filtering = select_proposals(masks, records, generator['score_thresh'],
+                                                    generator['mask_nms_thresh'])
+        return masks, records, dict(
+            generator=generator, filtering=filtering,
+            generate_seconds=generate_seconds,
+            code_revision=PARTGLEE_CODE_REVISION, clip_revision=PARTGLEE_CLIP_REVISION,
+            model_type='RN50', device=runtime['device'], precision=runtime['precision'],
+            input_shape=list(resized.shape[:2]), original_shape=list(rgb.shape[:2]),
+            mask_resize='bilinear_logits_then_threshold_zero',
+            score_definition='sigmoid(class_logit) * mean(sigmoid(mask_logit) inside mask)',
+            attention_backend='upstream_pytorch_reference', ignored_training_keys=len(ignored),
+            python_executable=sys.executable, torch_version=torch.__version__,
+            partglee_module=str(Path(partglee.__file__).resolve()),
+            detectron2_module=str(Path(detectron2.__file__).resolve()))
+
+    return predict, dict(model_load_seconds=load_seconds, generator=generator)

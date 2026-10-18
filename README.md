@@ -40,7 +40,7 @@ requirements-mosa.txt
 
 全覆盖分割功能的命令行逻辑直接写在 `dense_partition.py` 的 `if __name__ == '__main__':` 中，负责参数解析、单图或批量运行及结果导出。
 
-所有模型由 `common/models.py` 统一通过当前 Conda Python 启动短生命周期子进程。PartGLEE 和 MoSA 的适配实现分别位于 `common/partglee.py`、`common/mosa.py`；Semantic-SAM 的尺寸还原和兼容处理在 `common/models.py` 内完成。本项目使用 `common` 包名，与上游包可以同时导入。
+所有学习模型由 `common/models.py` 统一通过当前 Conda Python 启动独立子进程。每个模型只加载一次，在同一个进程中连续处理所有图片，随后退出释放显存，再启动下一个模型。PartGLEE 和 MoSA 的适配实现分别位于 `common/partglee.py`、`common/mosa.py`；Semantic-SAM 的尺寸还原和兼容处理在 `common/models.py` 内完成。本项目使用 `common` 包名，与上游包可以同时导入。
 
 旧 `configs/` 目录、完整 D 流程、Valen 判断、任务指令和旧评估代码已经移除。当前 benchmark 单独实现分区评测及代表点命中统计。历史实验保留在 `docs/` 和本地 `outputs/`；旧实现可从 Git 提交 `3d62972` 查看。数据、模型、输出不纳入 Git。
 
@@ -150,8 +150,11 @@ Raw 候选与原始覆盖率不受此合并影响。HF Demo 最多展示前 1000
 ```python
 from dense_partition import DensePartition
 
-segmenter = DensePartition.create("slic")  # 也可选 "sam2"、"unsamv2-plus"、"semantic-sam"、"partglee"、"mosa"
-result = segmenter.segment("data/umd/tools/knife_01/knife_01_00000122_rgb.jpg")
+# 也可选 "sam2"、"unsamv2-plus"、"semantic-sam"、"partglee"、"mosa"
+with DensePartition.create("slic") as segmenter:
+    result = segmenter.segment("data/umd/tools/knife_01/knife_01_00000122_rgb.jpg")
+    # 可以继续调用 segmenter.segment(下一张图片)，模型不会重新加载。
+# 离开 with 后模型显存已释放，result 仍可使用。
 
 labels = result.labels          # uint32[H, W]，ID 为 1…K，保留原图分辨率
 mask = result.mask(1)            # bool[H, W]
@@ -162,6 +165,8 @@ result.save("outputs/my_partition")  # 必须使用新目录
 ```
 
 输入也支持 PIL 图像或 `uint8[H,W,3]` RGB 数组。`result.masks` 可一次生成 `bool[K,H,W]`，大图建议逐个读取以节约内存。`result.rgb` 和 `result.labels` 默认只读；`result.metadata` 记录配置、原模型覆盖率与耗时。`result.owners` 为原始模型候选索引加一，0 表示原模型未覆盖；SLIC 的该字段为 `None`。`owners` 始终记录合并前的像素来源，最终标签会拆分连通域、合并小区域并重新编号，因此一个最终 Mask 可以包含多个来源。
+
+`start()` 显式初始化并返回 `startup_seconds`（资源检查、进程启动、导入、模型加载的总时间）与 `model_load_seconds`（其中模型构建与权重加载的时间）。不调用 `start()` 时，第一次 `segment()` 会自动初始化；后续调用复用模型。用 `with` 或 `try/finally` 中的 `close()` 释放资源。`metadata.segment_seconds` 不含初始化；初始化信息单独保存在 `metadata.initialization`，是同一个模型会话的记录，不应按图片累加。接口按顺序处理图片，不支持同一实例的并发调用。
 
 需要在调用时改变参数，可先取得独立配置；修改不会影响其他实例：
 
@@ -247,7 +252,7 @@ for proposal_id, mask in iter_masks("<模型分区目录>/raw_masks.npz"):
     print(proposal_id, mask.sum())
 ```
 
-所有模型的候选先按小区域优先消除重叠，面积相同则比较后端原生质量分数（SAM 系列为预测 IoU、稳定性；PartGLEE 和 MoSA 为原生候选分数），再将所有区域（包括未覆盖像素）拆成连通域。模型分别使用当前 Conda 的 Python 在短生命周期子进程中运行，以隔离上游包并释放显存；每张图都需要重新加载模型。SLIC 直接生成分区，随后与模型方法一样执行小区域合并。基类检查正整数连续编号、原分辨率和 4 连通性；导出时再读取二值 Mask，逐像素检查 `sum(masks[:, y, x]) == 1`。
+所有模型的候选先按小区域优先消除重叠，面积相同则比较后端原生质量分数（SAM 系列为预测 IoU、稳定性；PartGLEE 和 MoSA 为原生候选分数），再将所有区域（包括未覆盖像素）拆成连通域。两个脚本都按“模型 → 全部图片”运行，模型分别使用当前 Conda 的 Python 在独立进程中驻留；同一时间只保留当前模型，正常完成、异常和中断都会清理进程。SLIC 直接生成分区，随后与模型方法一样执行小区域合并。基类检查正整数连续编号、原分辨率和 4 连通性；导出时再读取二值 Mask，逐像素检查 `sum(masks[:, y, x]) == 1`。
 
 全覆盖是输出结构保证，不能作为分割准确率；模型漏覆盖区域补齐后也不代表模型识别出了这些区域。当前不进行模型与 SLIC 求交细分，六种方法各自独立输出。
 
@@ -275,9 +280,13 @@ python affordance_benchmark.py --manifest benchmarks/umd/manifest.json --split t
 
 结果自动保存在 `outputs/affordance_benchmark_年月日_时分秒_微秒/`，无需传入 `--output`：`index.html` 可切换图片和功能、查看原尺寸与代表点；`summary.csv`、`per_class.csv`、`per_sequence.csv`、`scores.csv`、`image_metrics.csv` 分别保存汇总与明细；`run.json` 保存实际配置、版本、耗时口径和失败记录；`manifest.json` 保存输入路径、哈希和标签信息。每次分割都保存原始候选、最终分区和各功能的 GT/最优组合/误差图。当前每次运行重新分割，不自动复用旧结果。
 
+每个模型的一次性启动时间记录在 `run.json.initialization`（分割脚本为 `summary.json.initialization`）；评测页面分别展示首次启动时间和单张分割时间。`wall_seconds` / `mean_wall_seconds` 不再包含模型加载，但包含进程间数据传递、推理及分区后处理；不包含结果保存、评测和绘图。没有额外预热，首张推理也计入平均值。耗时协议版本为 2，不能直接与旧版每图重新加载的时间混用。
+
 默认 debug 和 `--image` 都是开发评测，标注身份记为 `unknown`。正式清单需将样本标记为 `test`、`manual`，并填写非空 `annotation_evidence`；程序记录用户提供的依据，不自动判定哪些帧为人工标注。混合 dev/test 清单必须用 `--split` 选择，Tools 同一实例不能跨两组。运行中的个别方法失败后继续其他任务，记录失败并返回非零退出码；未完成的方法/子集汇总分数留空，逐图成功结果仍保留。格式与指标解释见 [06：UMD 分割评价](docs/06_umd_affordance_partition_benchmark.md)。
 
-本次验证通过 50 项单元/集成测试，包括最优组合与穷举结果一致、忽略像素、分组平均、失败记录及两个入口无参数连续运行。五张真实 debug 图、六种方法共 30 次分割全部成功，78 条功能评分的导出 Mask 与 CSV IoU 已独立回读核验。查看 [开发集评测页面](outputs/umd_benchmark/debug_all_v1/index.html) / [汇总表](outputs/umd_benchmark/debug_all_v1/summary.csv)。该小样本仅验证实现，未覆盖全部七类，不能作为正式性能排名。
+本次验证通过 55 项单元/集成测试，包括最优组合与穷举结果一致、忽略像素、分组平均、失败记录、两个入口无参数运行、模型按顺序复用、进程异常和中断清理。五张真实 debug 图、六种方法共 30 次分割全部成功；每种学习模型的五张图片使用同一个进程，完成后均已退出。30 份最终标签与旧流程逐像素一致。查看 [常驻模型开发集评测页面](outputs/affordance_benchmark_20261018_205942_939471/index.html) / [汇总表](outputs/affordance_benchmark_20261018_205942_939471/summary.csv)。该小样本仅验证实现，未覆盖全部七类，不能作为正式性能排名。
+
+上述常驻模型验证在 `cuda:1` 上运行。SAM2、PartGLEE、MoSA 的单张分割平均约为 0.87、0.85、0.92 秒，首次准备分别约为 4.31、6.02、3.24 秒；实际耗时取决于图片与设备负载。[初版开发集结果](outputs/umd_benchmark/debug_all_v1/index.html) 包含每张图重新加载的开销，仅供历史对照。
 
 ## 检查与研究记录
 

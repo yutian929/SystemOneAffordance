@@ -70,7 +70,8 @@ class SmallRegionTest(TestCase):
                     engine = DensePartition.create(method)
                     source = None if method == 'slic' else owners
                     raw = labels if method == 'slic' else (owners > 0)[None]
-                    with patch.object(engine, '_segment_rgb', return_value=(labels, source, {}, raw)):
+                    with patch.object(engine, 'start', return_value={}), \
+                            patch.object(engine, '_segment_rgb', return_value=(labels, source, {}, raw)):
                         result = engine.segment(rgb)
                 self.assertEqual(result.region_count, expected_count)
                 self.assertEqual(result.metadata['config']['postprocess']['min_mask_area'], threshold)
