@@ -7,7 +7,7 @@ DEVICE = 'cuda:1'  # 单卡改为 cuda:0；SLIC 使用 CPU
 MIN_MASK_AREA = 16  # 原图像素数；小于此面积的最终区域并入邻居，0 关闭；适用于全部方法
 
 UNSAMV2_PLUS = {
-    'granularity': 0.1,  # [0.1, 1.0]，越小倾向越细
+    'granularity': 0.2,  # [0.1, 1.0]，越小倾向越细；过小可能漏掉物体/部件
     'pred_iou_thresh': 0.77,  # Predicted IoU threshold：降低保留更多候选
     'stability_score_thresh': 0.9,  # Stability threshold：降低筛选更宽松
 }

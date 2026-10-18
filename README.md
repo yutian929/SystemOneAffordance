@@ -87,7 +87,7 @@ python scripts/download_unsamv2.py
 | `DEFAULT_METHOD` | Python API 默认 `slic`；命令行未指定 `--method` 时运行全部方法 |
 | `DEVICE` | 当前 `cuda:1`，单卡机器改为 `cuda:0`。SLIC 始终使用 CPU |
 | `MIN_MASK_AREA` | 所有方法统一的后处理阈值，默认 `16`：面积严格小于 16 个原图像素的区域并入邻居；`0` 关闭 |
-| `UNSAMV2_PLUS.granularity` | 范围 `[0.1, 1.0]`，越小倾向越细；HF Demo 初始值为 `0.15` |
+| `UNSAMV2_PLUS.granularity` | 范围 `[0.1, 1.0]`，默认 `0.2`；越小倾向越细，但过小可能漏掉物体/部件，并非越小越好；HF Demo 初始值为 `0.15` |
 | `UNSAMV2_PLUS.pred_iou_thresh` | 对应 Predicted IoU threshold；降低保留更多候选，HF Demo 默认 `0.77` |
 | `UNSAMV2_PLUS.stability_score_thresh` | 对应 Stability threshold；降低筛选更宽松，HF Demo 默认 `0.9` |
 | `SEMANTIC_SAM.level` | 唯一日常控制项：`[1]` / `[2]` 语义级，`[3]` 实例级，`[4]` / `[5]` / `[6]` 不同部件粒度；默认 `[1, 2, 3, 4, 5, 6]` 保留全部层级 |
