@@ -152,9 +152,11 @@ python dense_partition.py --method slic --output outputs/slic_debug
 
 不指定 `--image` 时默认读取 `config.DEBUG_IMAGES`；不指定 `--method` 时运行全部方法（SAM 2.1、UnSAMv2+、Semantic-SAM、SLIC）。`--debug` 仍可显式使用，与 `--image` 互斥。
 
-输出目录必须尚不存在，防止覆盖旧结果。打开输出目录中的 `index.html`，可切换图片、显示方式，点击像素查看各方法对应的 Mask，并下载二值 PNG；`overview.jpg` 是并排总览。
+输出目录必须尚不存在，防止覆盖旧结果。打开输出目录中的 `index.html`，可切换图片、查看原尺寸，点击像素查看各方法对应的最终 Mask，并下载二值 PNG。
 
-页面每行展示同一方法的 **原图 / 处理前 / 处理后**，同时列出 Mask 数、覆盖率和重叠率。模型“处理前”指自动生成器 `generate()` 返回的全部候选，已包含其内部的质量过滤和去重，尚未经过本项目的分区后处理；SLIC 则展示连通域重编号前的直接输出。彩色图叠加全部候选，重叠处会有遮挡；切换“原始覆盖情况”可查看未覆盖像素（粉色）和重叠像素（橙色）。处理后列的粉色只标记补齐区域的来源。
+页面每个方法占一行，固定按 **Original → Raw colors → Boundaries → Colors → Overlay** 展示：原图、原始候选纯色图、最终分区边界图、最终分区纯色图、最终分区叠加图。每行只保留 Raw / Final Mask 数量和选中区域信息；详细统计在 `summary.json` 中。`overview.jpg` 按图片、方法逐行排列，每行使用相同的五列顺序；单个方法的 `comparison.jpg` 也采用此顺序。
+
+Raw 指自动生成器 `generate()` 返回的全部候选，已包含其内部的质量过滤和去重，尚未经过本项目的分区后处理；SLIC 则展示连通域重编号前的直接输出。Raw colors 中黑色表示没有候选覆盖，重叠处优先展示小 Mask。额外的覆盖情况图仍保存在 `raw_coverage.png`（粉色为未覆盖、橙色为重叠）和 `coverage.png`（粉色为补齐区域来源）中。
 
 原始模型 Mask 另外无损保存在 `raw_masks.npz`，保留候选顺序、重叠和空白；`pixel_owners.npy` 仅记录消除重叠后的归属，不能代替原始候选。历史输出没有保留这些候选时，需要重新运行才能生成前后对照。
 
@@ -179,7 +181,7 @@ partitions/<图像内容哈希>/<方法>/
   original.png / ids.png
   boundaries.png / overlay.png / colors.png / coverage.png
   raw_boundaries.png / raw_overlay.png / raw_colors.png / raw_coverage.png
-  comparison.jpg                     # 原图 / 处理前 / 处理后
+  comparison.jpg                     # Original / Raw colors / Boundaries / Colors / Overlay
 ```
 
 读取已有导出：

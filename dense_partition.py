@@ -7,13 +7,11 @@ from pathlib import Path
 import time
 from typing import final
 
-from PIL import Image
-
 from config import DEBUG_IMAGES, DEFAULT_METHOD, METHOD_NAMES, OUTPUT_DIR, get_config, validate_config
 from common.io import image_digest, read_image, write_json
 from common.partition import connected_labels, merge_small_regions, resolve_masks
 from common.result import PartitionResult
-from common.visualization import contact_sheet, write_viewer
+from common.visualization import write_overview, write_viewer
 
 
 class DensePartition(ABC):
@@ -125,10 +123,8 @@ if __name__ == '__main__':
     summary = {'completed': False, 'methods': methods,
                'config': {name: engine.config for name, engine in engines.items()}, 'images': []}
     write_json(output / 'summary.json', summary)
-    tiles = []
     for path, rgb, key in images:
         row = {'name': path.stem, 'key': key, 'source': str(path.resolve()), 'results': {}}
-        tiles.append((path.stem, Image.fromarray(rgb)))
         for method, engine in engines.items():
             print(f'{path.name}: {METHOD_NAMES[method]} ...', flush=True)
             result = engine.segment(rgb)
@@ -142,14 +138,10 @@ if __name__ == '__main__':
                 'raw_output': metadata['raw_output'],
                 'segment_seconds': result.metadata['segment_seconds'],
             }
-            for prefix, title in [('raw_', f'Raw: {metadata["raw_output"]["mask_count"]}'),
-                                  ('', f'Final: {result.region_count}')]:
-                with Image.open(output / relative / f'{prefix}overlay.png') as overlay:
-                    tiles.append((f'{METHOD_NAMES[method]} {title}', overlay.copy()))
             print(f'  {result.region_count} masks; coverage=100%; overlap=0; exported masks verified', flush=True)
         summary['images'].append(row)
         write_json(output / 'summary.json', summary)
-    contact_sheet(tiles, output / 'overview.jpg', columns=2 * len(methods) + 1)
+    write_overview(output, summary)
     write_viewer(output, summary)
     summary['completed'] = True
     write_json(output / 'summary.json', summary)

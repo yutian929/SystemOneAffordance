@@ -8,7 +8,7 @@ from PIL import Image
 
 from common.io import export_partition, export_raw_segmentation, write_json
 from common.partition import validate_partition
-from common.visualization import contact_sheet, render_partition, render_raw_masks
+from common.visualization import VIEW_COLUMNS, contact_sheet, render_partition, render_raw_masks
 
 
 @dataclass(frozen=True)
@@ -79,11 +79,12 @@ class PartitionResult:
                           render_partition(self.rgb, self.raw_segmentation))
             for name, image in raw_images.items():
                 image.save(directory / f'raw_{name}.png')
-            contact_sheet([
-                ('Original', Image.fromarray(self.rgb)),
-                (f'Raw: {raw_info["mask_count"]} masks', raw_images['overlay']),
-                (f'Final: {self.region_count} masks', final_images['overlay']),
-            ], directory / 'comparison.jpg', columns=3, cell_width=self.rgb.shape[1])
+            views = {'original': Image.fromarray(self.rgb), 'raw_colors': raw_images['colors'],
+                     **final_images}
+            contact_sheet([(title, views[name]) for name, title in VIEW_COLUMNS],
+                          directory / 'comparison.jpg', columns=len(VIEW_COLUMNS),
+                          cell_width=self.rgb.shape[1],
+                          row_titles=[f'Raw: {raw_info["mask_count"]} / Final: {self.region_count} masks'])
         write_json(directory / 'metadata.json', {
             **self.metadata, **stats, 'regions': regions,
             'raw_output': raw_info,
