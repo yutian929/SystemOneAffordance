@@ -9,7 +9,8 @@ import time
 
 import numpy as np
 
-from config import ROOT, SAM2_DOWNLOAD, UNSAM_CHECKPOINT_SHA256, UNSAM_CODE_REVISION
+from utils.settings import (ROOT, SAM2_DOWNLOAD, UNSAM_CHECKPOINT_SHA256,
+                            UNSAM_CODE_REVISION, default_arguments)
 from utils.io import write_json
 
 
@@ -107,6 +108,7 @@ def _worker(request_path):
     model = build_sam2(model_config['model_config'], request['checkpoint'], device=device,
                        apply_postprocessing=model_config['apply_postprocessing'])
     generator = SAM2AutomaticMaskGenerator(model, **settings['generator'])
+    generator_config = {**default_arguments(SAM2AutomaticMaskGenerator), **settings['generator']}
     synchronize()
     load_seconds = time.perf_counter() - start
     directory = Path(request['directory'])
@@ -125,6 +127,7 @@ def _worker(request_path):
                for proposal in proposals]
     write_json(directory / 'result.json', {
         'records': records, 'load_seconds': load_seconds, 'generate_seconds': generate_seconds,
+        'generator': generator_config,
         'device': device, 'precision': runtime['precision'] if cuda else 'float32',
         'code_revision': UNSAM_CODE_REVISION if unsam else None,
         'sam2_module': str(Path(sam2.__file__).resolve()),

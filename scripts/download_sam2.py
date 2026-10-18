@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import SAM2, SAM2_DOWNLOAD
+from utils.settings import SAM2, SAM2_DOWNLOAD
 from utils.io import file_digest, write_json
 
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')

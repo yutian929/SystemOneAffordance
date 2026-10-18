@@ -1,5 +1,6 @@
 """Single-image and debug-batch entry point for the common partition API."""
 import argparse
+import json
 from pathlib import Path
 
 from PIL import Image
@@ -32,8 +33,9 @@ def main(factory):
         parser.error('No input images configured')
     output = args.output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
-    summary = {'completed': False, 'methods': methods, 'images': [],
-               'config': {name: engine.config for name, engine in engines.items()}}
+    # Put the per-method configuration snapshot before potentially long image results.
+    summary = {'completed': False, 'methods': methods,
+               'config': {name: engine.config for name, engine in engines.items()}, 'images': []}
     write_json(output / 'summary.json', summary)
     tiles = []
     for path, rgb, key in images:
@@ -42,19 +44,24 @@ def main(factory):
         for method, engine in engines.items():
             print(f'{path.name}: {METHOD_NAMES[method]} ...', flush=True)
             result = engine.segment(rgb)
+            summary['config'][method] = result.metadata['config']
             relative = Path('partitions') / key / method
             result.save(output / relative)
+            metadata = json.loads((output / relative / 'metadata.json').read_text())
             row['results'][method] = {
                 'directory': relative.as_posix(), **result.validate(),
                 'raw_coverage_fraction': result.metadata['raw_coverage_fraction'],
+                'raw_output': metadata['raw_output'],
                 'segment_seconds': result.metadata['segment_seconds'],
             }
-            with Image.open(output / relative / 'boundaries.png') as boundary:
-                tiles.append((f'{METHOD_NAMES[method]}: {result.region_count}', boundary.copy()))
+            for prefix, title in [('raw_', f'Raw: {metadata["raw_output"]["mask_count"]}'),
+                                  ('', f'Final: {result.region_count}')]:
+                with Image.open(output / relative / f'{prefix}overlay.png') as overlay:
+                    tiles.append((f'{METHOD_NAMES[method]} {title}', overlay.copy()))
             print(f'  {result.region_count} masks; coverage=100%; overlap=0; exported masks verified', flush=True)
         summary['images'].append(row)
         write_json(output / 'summary.json', summary)
-    contact_sheet(tiles, output / 'overview.jpg', columns=len(methods) + 1)
+    contact_sheet(tiles, output / 'overview.jpg', columns=2 * len(methods) + 1)
     write_viewer(output, summary)
     summary['completed'] = True
     write_json(output / 'summary.json', summary)

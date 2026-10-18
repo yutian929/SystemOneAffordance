@@ -6,7 +6,7 @@ from typing import final
 
 from config import DEFAULT_METHOD, get_config, validate_config
 from utils.io import image_digest, read_image
-from utils.partition import connected_labels, merge_tiny_regions, resolve_masks
+from utils.partition import connected_labels, resolve_masks
 from utils.result import PartitionResult
 
 
@@ -38,27 +38,25 @@ class DensePartition(ABC):
     def segment(self, image) -> PartitionResult:
         rgb = read_image(image)
         start = time.perf_counter()
-        labels, owners, details = self._segment_rgb(rgb)
+        labels, owners, details, raw = self._segment_rgb(rgb)
         if labels.shape != rgb.shape[:2]:
             raise ValueError('Partition must preserve the input image resolution')
         return PartitionResult(labels, rgb, {
             **details, 'method': self.method, 'config': self.config,
             'image_sha256': image_digest(rgb), 'shape': list(rgb.shape[:2]),
             'segment_seconds': time.perf_counter() - start,
-        }, owners)
+        }, owners, raw)
 
     @abstractmethod
     def _segment_rgb(self, rgb):
-        """Return (labels, optional raw proposal owners, metadata)."""
+        """Return (labels, optional proposal owners, metadata, raw masks/labels)."""
 
     def _segment_with_proposals(self, rgb):
         from utils.models import generate_proposals
         masks, records, backend = generate_proposals(rgb, self._config)
+        self._config['generator'] = backend['generator']
         labels, owners, stats = resolve_masks(masks, records, rgb.shape[:2])
-        stats['regions_before_cleanup'] = int(labels.max())
-        labels, merged = merge_tiny_regions(
-            labels, rgb, self._config['partition']['minimum_model_region_area'])
-        return labels, owners, {**stats, 'merged_small_regions': merged, 'backend': backend}
+        return labels, owners, {**stats, 'backend': backend, 'raw_proposals': records}, masks
 
 
 class SAM21Partition(DensePartition):
@@ -80,8 +78,9 @@ class SLICPartition(DensePartition):
 
     def _segment_rgb(self, rgb):
         from skimage.segmentation import slic
-        labels = connected_labels(slic(rgb, **self._config['algorithm']))
-        return labels, None, {'device': 'cpu', 'raw_coverage_fraction': 1.0}
+        raw = slic(rgb, **self._config['algorithm'])
+        labels = connected_labels(raw)
+        return labels, None, {'device': 'cpu', 'raw_coverage_fraction': 1.0}, raw
 
 
 if __name__ == '__main__':

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dense_partition import DensePartition, SAM21Partition, UnSAMv2PlusPartition, SLICPartition
 from config import get_config
 from utils.io import export_partition, iter_masks
-from utils.partition import connected_labels, merge_tiny_regions, resolve_masks, validate_partition
+from utils.partition import connected_labels, resolve_masks, validate_partition
 from unittest.mock import patch
 from PIL import Image
 import json
@@ -50,18 +50,6 @@ class DensePartitionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '4-connected'):
             validate_partition(np.array([[1, 2], [2, 1]]))
 
-    def test_small_region_merge_is_adjacent_and_color_driven(self):
-        source = np.array([[1, 1, 3, 2, 2], [1, 1, 2, 2, 2], [1, 1, 2, 2, 2]])
-        rgb = np.zeros((*source.shape, 3), np.uint8)
-        rgb[source == 1] = 255
-        labels, merged = merge_tiny_regions(source, rgb, minimum=2)
-        self.assertEqual(merged, 1)
-        self.assertEqual(labels[0, 2], labels[0, 3])
-        self.assertNotEqual(labels[0, 2], labels[0, 1])
-        self.assertEqual(validate_partition(labels)['region_count'], 2)
-        one, _ = merge_tiny_regions(np.ones((1, 1), int), np.zeros((1, 1, 3), np.uint8), 16)
-        self.assertEqual(validate_partition(one)['region_count'], 1)
-
     def test_packed_export_reconstructs_non_byte_aligned_width(self):
         rgb = np.zeros((12, 13, 3), np.uint8)
         rgb[:, 6:] = 255
@@ -92,20 +80,35 @@ class CommonAPITest(unittest.TestCase):
         with self.assertRaises(ValueError):
             DensePartition.create('missing')
         settings = get_config('slic')
+        original_segments = settings['algorithm']['n_segments']
         engine = DensePartition.create('slic', settings)
         settings['algorithm']['n_segments'] = 1
         exported = engine.config
         exported['algorithm']['n_segments'] = 2
-        self.assertEqual(engine.config['algorithm']['n_segments'], 1200)
+        self.assertEqual(engine.config['algorithm']['n_segments'], original_segments)
 
     def test_invalid_config_is_rejected(self):
         for method, section, key, value in [('slic', 'algorithm', 'n_segments', 0),
                                            ('sam2', 'generator', 'points_per_batch', 0),
+                                           ('unsamv2-plus', 'generator', 'pred_iou_thresh', -0.1),
+                                           ('unsamv2-plus', 'generator', 'stability_score_thresh', 1.1),
                                            ('unsamv2-plus', 'model', 'granularity', float('nan'))]:
             settings = get_config(method)
             settings[section][key] = value
             with self.assertRaises(ValueError):
                 DensePartition.create(method, settings)
+
+    def test_unsam_demo_controls_are_independent_from_sam(self):
+        import config
+        with patch.dict(config.UNSAMV2_PLUS, granularity=0.35, pred_iou_thresh=0.61,
+                        stability_score_thresh=0.88):
+            unsam = DensePartition.create('unsamv2-plus').config
+            sam = DensePartition.create('sam2').config
+        self.assertEqual(unsam['model']['granularity'], 0.35)
+        self.assertEqual(unsam['generator']['pred_iou_thresh'], 0.61)
+        self.assertEqual(unsam['generator']['stability_score_thresh'], 0.88)
+        self.assertEqual(sam['generator'], {})  # Uses SAM's own library defaults.
+        self.assertNotIn('partition', unsam)
 
     def test_image_inputs_and_mask_contract(self):
         rgb = np.random.default_rng(7).integers(0, 256, (20, 23, 3), dtype=np.uint8)
@@ -136,7 +139,7 @@ class CommonAPITest(unittest.TestCase):
         engine = DensePartition.create('slic')
         rgb = np.zeros((2, 2, 3), np.uint8)
         for invalid in (np.zeros((2, 2), int), np.ones((1, 2), int), np.array([[1, 2], [2, 1]])):
-            with patch.object(engine, '_segment_rgb', return_value=(invalid, None, {})):
+            with patch.object(engine, '_segment_rgb', return_value=(invalid, None, {}, None)):
                 with self.assertRaises(ValueError):
                     engine.segment(rgb)
 
@@ -149,17 +152,35 @@ class CommonAPITest(unittest.TestCase):
                    dict(predicted_iou=.6, stability_score=.8)]
         for method in ('sam2', 'unsamv2-plus'):
             settings = get_config(method)
-            settings['partition']['minimum_model_region_area'] = 1
-            with patch('utils.models.generate_proposals', return_value=(masks, records, {})):
+            backend = {'generator': settings['generator']}
+            with patch('utils.models.generate_proposals', return_value=(masks, records, backend)):
                 result = DensePartition.create(method, settings).segment(rgb)
             self.assertEqual(result.owners[3, 4], 2)
             self.assertEqual(result.owners[0, 0], 0)
             self.assertEqual(result.metadata['raw_uncovered_pixels'], 30)
             self.assertTrue(np.all(result.masks.sum(axis=0) == 1))
-            with patch('utils.models.generate_proposals', return_value=(np.zeros((0, 8, 9), bool), [], {})):
+            self.assertEqual(int(result.mask(int(result.labels[3, 4])).sum()), 6)
+            np.testing.assert_array_equal(result.raw_segmentation, masks)
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = result.save(Path(temporary) / method)
+                raw = np.stack([mask for _, mask in iter_masks(directory / 'raw_masks.npz')])
+                np.testing.assert_array_equal(raw, masks)
+                self.assertEqual(int((raw.sum(axis=0) > 1).sum()), 6)
+                self.assertEqual(int((raw.sum(axis=0) == 0).sum()), 30)
+                metadata = json.loads((directory / 'metadata.json').read_text())
+                self.assertEqual(metadata['raw_proposals'], records)
+                self.assertEqual(metadata['raw_output']['mask_count'], 2)
+                self.assertAlmostEqual(metadata['raw_output']['overlap_fraction'], 6 / 72)
+                for name in ('raw_overlay.png', 'raw_boundaries.png', 'raw_coverage.png', 'comparison.jpg'):
+                    self.assertTrue((directory / name).is_file(), name)
+            with patch('utils.models.generate_proposals', return_value=(np.zeros((0, 8, 9), bool), [], backend)):
                 empty = DensePartition.create(method, settings).segment(rgb)
             self.assertEqual(empty.region_count, 1)
             self.assertEqual(empty.metadata['raw_coverage_fraction'], 0)
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = empty.save(Path(temporary) / method)
+                self.assertEqual(list(iter_masks(directory / 'raw_masks.npz')), [])
+                np.testing.assert_array_equal(np.asarray(Image.open(directory / 'raw_overlay.png')), rgb)
 
     def test_slic_cli_exports_without_model_imports(self):
         root = Path(__file__).resolve().parents[1]
@@ -189,9 +210,15 @@ runpy.run_path('dense_partition.py', run_name='__main__')
             self.assertEqual(len(summary['images']), 1)
             directory = output / summary['images'][0]['results']['slic']['directory']
             metadata = json.loads((directory / 'metadata.json').read_text())
+            self.assertEqual(summary['config']['slic'], metadata['config'])
+            self.assertEqual(summary['config']['slic']['runtime']['device'], 'cpu')
             self.assertTrue(metadata['export_verified'])
             self.assertEqual(metadata['minimum_masks_per_pixel'], 1)
             self.assertEqual(metadata['maximum_masks_per_pixel'], 1)
+            self.assertEqual(metadata['raw_output']['kind'], 'slic_labels')
+            raw = np.load(directory / 'raw_labels.npy', allow_pickle=False)
+            np.testing.assert_array_equal(connected_labels(raw), np.load(directory / 'labels.npy'))
+            self.assertEqual(summary['images'][0]['results']['slic']['raw_output'], metadata['raw_output'])
             masks = np.stack([mask for _, mask in iter_masks(directory / 'masks.npz')])
             self.assertTrue(np.all(masks.sum(axis=0) == 1))
             self.assertTrue((output / 'index.html').is_file())

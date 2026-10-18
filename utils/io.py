@@ -98,3 +98,25 @@ def iter_masks(path):
         height, width = map(int, archive['shape'])
     for region_id, row in zip(ids, packed):
         yield int(region_id), np.unpackbits(row, axis=1, count=width).astype(bool).reshape(height, width)
+
+
+def export_raw_segmentation(directory, raw):
+    """Preserve generator masks verbatim, including overlaps and uncovered pixels."""
+    if raw.ndim == 2:
+        np.save(directory / 'raw_labels.npy', raw, allow_pickle=False)
+        if not np.array_equal(np.load(directory / 'raw_labels.npy', allow_pickle=False), raw):
+            raise AssertionError('Saved raw labels differ from SLIC output')
+        return dict(kind='slic_labels', file='raw_labels.npy', mask_count=int(np.unique(raw).size),
+                    coverage_fraction=1.0, overlap_fraction=0.0, export_verified=True)
+    path = directory / 'raw_masks.npz'
+    ids = np.arange(1, len(raw) + 1, dtype=np.uint32)
+    np.savez_compressed(path, packed_masks=np.packbits(raw, axis=2),
+                        shape=np.array(raw.shape[1:]), ids=ids)
+    counts = np.zeros(raw.shape[1:], np.uint32)
+    for mask_id, saved in iter_masks(path):
+        if not np.array_equal(saved, raw[mask_id - 1]):
+            raise AssertionError('Saved raw mask differs from generator output')
+        counts += saved
+    return dict(kind='model_proposals', file=path.name, mask_count=len(raw),
+                coverage_fraction=float(np.mean(counts > 0)),
+                overlap_fraction=float(np.mean(counts > 1)), export_verified=True)

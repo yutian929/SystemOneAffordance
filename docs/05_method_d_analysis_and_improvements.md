@@ -951,7 +951,7 @@ for region_id, mask in iter_masks("<某个分区目录>/masks.npz"):
 根目录只有两个 Python 文件：
 
 - `dense_partition.py`：抽象基类 `DensePartition`、`SAM21Partition`、`UnSAMv2PlusPartition`、`SLICPartition` 和统一工厂。
-- `config.py`：模型路径、下载版本、运行设备、生成器参数、SLIC 参数、分区后处理参数和 debug 图片列表。
+- `config.py`：运行设备、UnSAMv2+ 的三个 Demo 控制项、SLIC 常用参数和 debug 图片列表。模型资源与内部设置位于 `utils/settings.py`。
 
 `utils/` 保存通用图像读取、分区转换与验证、结果类型、Mask 导出、模型进程适配和可视化。`scripts/` 只有 SAM 2.1 和 UnSAMv2+ 两个模型下载脚本。
 
@@ -977,7 +977,7 @@ result = engine.segment(image)
 | `result.mask(i)` | `bool[H,W]` | 第 i 个最终 Mask，等价于 `labels == i` |
 | `result.masks` | `bool[K,H,W]` | 按需创建的完整 Mask 集合；大图优先使用 `iter_masks()` |
 
-`owners` 是合并前的候选来源记录。合并后某个最终 Mask 可能包含多个来源以及模型未覆盖像素，因此不能把 `owners` 当作最终 Mask 编号。
+`owners` 是原始候选来源记录；最终分区还会拆分连通域、重编号，因此不能把它当作最终 Mask 编号。当前流程不合并小碎片。
 
 基类 `segment()` 在返回前统一检查：原分辨率、正整数连续编号、每个 Mask 为 4 连通区域。唯一标签表示从结构上保证每个像素恰好属于一个区域。保存时再次从压缩文件解码全部二值 Mask，独立验证：
 
@@ -1004,8 +1004,7 @@ flowchart TD
     P --> O[小区域优先；质量、稳定性与索引打破平局]
     O --> A[每像素确定唯一原始候选来源 owners]
     A --> B[所有值拆成 4 连通区域，包括原模型未覆盖区]
-    B --> M[合并小于配置面积的相邻微小区域]
-    M --> V[基类检查：正整数连续标签、原分辨率、4 连通]
+    B --> V[基类检查：正整数连续标签、原分辨率、4 连通]
     L --> SL[SLIC 超像素 + 4 连通区域重编号]
     SL --> V
     V --> RES[PartitionResult：labels / mask / metadata]
@@ -1013,9 +1012,9 @@ flowchart TD
     E --> Q[重新读取二值 Mask：逐像素求和必须等于 1]
 ```
 
-两个模型默认使用相同生成参数：96×96 点网格、batch 64、IoU 阈值 0.5、稳定性阈值 0.8。UnSAMv2+ 默认 `granularity=0.15`；粒度传给官方实现的 `generate(..., gra=...)`。模型分区默认合并小于 16 像素的区域，合并目标限定为相邻且平均 Lab 颜色最接近的区域。若要保留所有细碎分区，将 `minimum_model_region_area` 设为 1。
+当前 SAM 2.1 使用官方自动生成器默认值；UnSAMv2+ 的配置独立，直接提供 HF Demo 的 `granularity`、`pred_iou_thresh`、`stability_score_thresh`。粒度通过 `generate(..., gra=...)` 传入，阈值传给生成器。原共用生成配置与额外的小碎片合并已删除，具体设置见第 13.6 节。
 
-SLIC 默认目标 1200 个区域，`compactness=5`、`sigma=0.5`。实际区域数受连通性和图像内容影响。当前三种方法各自独立输出，不再保留模型与 SLIC 直接求交的组合入口。
+SLIC 当前目标 30 个区域，`compactness=5`、`sigma=0.5`。实际区域数受连通性和图像内容影响。当前三种方法各自独立输出，不再保留模型与 SLIC 直接求交的组合入口。
 
 SAM 与 UnSAM 的 Python 包都叫 `sam2`，因此二者均在独立子进程中加载和推理；每张图结束即退出进程，释放 GPU 内存。代价是每张图重新加载模型。父进程做通用转换和导出；SLIC 全程 CPU 且不导入 PyTorch。所有运行参数保存在输出元数据中。
 
@@ -1031,7 +1030,7 @@ python -m unittest discover -s tests -v
 
 详见 [README](../README.md) 中的环境配置、参数表和 Python API。模型配置字段中的 `configs/…yaml` 是第三方包内部的资源名称，与已删除的仓库 `configs/` 目录无关。
 
-### 13.5 本次重构验证
+### 13.5 首次重构验证（历史参数，提交 `0fbe7d0`）
 
 2026-10-18 在现有 Miniconda 环境中通过 11 项单元测试和 `pip check`，并使用真实模型重新处理全部 5 张 debug 图片，共生成 15 份分区。对照第 12 节的模型 `native` 与 SLIC `s1200`，**15 份 `labels.npy` 均逐像素完全一致**，本次调整未改变对应参数下的分割结果。
 
@@ -1041,3 +1040,32 @@ python -m unittest discover -s tests -v
 - [运行参数和统计](../outputs/dense_partition_refactored/summary.json) / [逐像素回归记录](../outputs/dense_partition_refactored/regression_check.json) / [浏览器验证](../outputs/dense_partition_refactored/browser_check.json)。
 
 这些结果是本地产物，不纳入 Git；重新运行时使用新输出目录。当前只验证了分区契约与重构一致性，没有恢复后续 Affordance 决策流程。
+
+
+### 13.6 对齐官方 Demo 的配置接口
+
+SAM 2.1 使用官方 `SAM2AutomaticMaskGenerator` 默认参数。UnSAMv2+ 在 `config.py` 单独提供三个控制项，与 [HF Demo 源码](https://huggingface.co/spaces/yujunwei04/UnSAMv2/blob/675a2bceabf284b69d5d537a3aa798b53c50a8ff/app.py) 的全图分割界面对应：
+
+| 控制项 | 当前值 | 作用 |
+| --- | ---: | --- |
+| `granularity` | 0.2 | 保留当前用户设置；越小倾向越细。Demo 初始值为 0.15 |
+| `pred_iou_thresh` | 0.77 | Demo 默认质量过滤阈值 |
+| `stability_score_thresh` | 0.9 | Demo 默认稳定性过滤阈值 |
+
+UnSAMv2+ 内部采用该 Demo 的全图生成设置，包括 64×64 采样点、batch 128、`mask_threshold=-1`、`use_m2m=True`，不再与 SAM 2.1 强行共用参数。SLIC 保留当前用户设置 `n_segments=30`。
+
+模型分区仅做小候选优先的重叠归属、未覆盖区域补齐和连通域拆分。额外的 `minimum_model_region_area` 和小区域合并代码已删除。全覆盖、互斥和连通性检查仍执行。Demo 最多展示前 1000 个原始候选，本地保留全部候选并输出严格分区，不把最终分区等同于 Demo 的候选叠加图。
+
+`summary.json` 和各分区的 `metadata.json` 均记录实际参数；模型加载后会读取官方生成器的默认值，连同覆盖值写入 `config.generator`，粒度记录在 `config.model.granularity`。第 13.5 节是旧参数的历史回归，不能用于声称新参数下结果不变。
+
+本次配置调整通过 11 项单元测试，并对 `knife_01_00000122_rgb.jpg` 完成三方法真实运行。三份导出均满足每像素恰好属于一个 Mask，且所有区域为 4 连通；实际参数记录确认 UnSAMv2+ 使用 `0.2 / 0.77 / 0.9`，SAM 2.1 使用独立的官方默认值。查看 [本次结果](../outputs/demo_controls_smoke/index.html) 与 [参数和统计](../outputs/demo_controls_smoke/summary.json)。此检查验证配置传递与分区约束，不代表已评估分割质量。
+
+### 13.7 保存处理前后的分割结果
+
+模型候选在进入 `resolve_masks()` 前保留到 `PartitionResult.raw_segmentation`，类型为 `bool[N,H,W]`；SLIC 对应其算法直接返回的整数标签。保存时额外导出 `raw_masks.npz`（模型）或 `raw_labels.npy`（SLIC），原始候选的顺序和评分保存在 `metadata.json` 的 `raw_proposals` 中。原始候选允许重叠和遗漏，最终 `masks.npz` 仍严格满足全覆盖、无重叠。
+
+`raw_overlay.png` 和 `overlay.png` 分别显示处理前后的结果，`comparison.jpg` 将原图与二者并排。`raw_coverage.png` 标记原始候选的遗漏（粉色）和重叠（橙色）；彩色叠加图仅用于展示，候选间的遮挡不会修改保存的原始 Mask。这里的“处理前”指自动生成器返回结果，已经过生成器内部的筛选，并非网络未经筛选的预测。
+
+交互页面每行展示一个方法的原图、处理前和处理后；可切换图像与显示方式，处理后列保留像素选中、Mask 高亮和下载功能。旧输出未保存原始候选，不能从最终分区逆推出完整候选，需要重新推理。
+
+验证：11 项测试通过；使用当前用户设置（UnSAMv2+ `0.1 / 0.4 / 0.9`，SLIC `n_segments=50`）重新处理 5 张 debug 图片，共导出 15 组前后结果。全部原始数据重新读取核验，最终二值 Mask 均逐像素满足覆盖数为 1。浏览器检查覆盖 5 张图片、4 种显示模式，并确认选中 Mask 的 PNG 下载与最终标签一致，无浏览器运行错误。查看 [对照页面](../outputs/partition_before_after/index.html)、[导出检查](../outputs/partition_before_after/export_check.json) 和 [浏览器检查](../outputs/partition_before_after/browser_check.json)。
