@@ -9,7 +9,24 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 METHOD_NAMES = {'sam2': 'SAM 2.1 small', 'unsamv2-plus': 'UnSAMv2+',
-                'semantic-sam': 'Semantic-SAM', 'slic': 'SLIC'}
+                'semantic-sam': 'Semantic-SAM', 'partglee': 'PartGLEE RN50', 'slic': 'SLIC'}
+
+PARTGLEE_CODE_URL = 'https://github.com/ProvenceStar/PartGLEE.git'
+PARTGLEE_CODE_REVISION = '8c6b83e0be076e8fe640943096059ee5c180de0e'
+PARTGLEE_CHECKPOINT_URL = ('https://drive.usercontent.google.com/download?'
+                          'id=1SK0HsYXBcTvprFAxqxH-lgpkgV67B4UZ&export=download&confirm=t')
+# SHA-256 of the RN50 file downloaded from the authors' Model Zoo Google Drive link.
+PARTGLEE_CHECKPOINT_SHA256 = '537e222d3db5cd989d962d01ff03bdadb9c1aa0b1bebf07da2b1977dfca25353'
+PARTGLEE_CLIP_REVISION = '7f3c293b71380bbd3a8d0af7e1bae73bffb1b4f6'
+PARTGLEE_CLIP_SHA256 = 'a63082132ba4f97a80bea76823f544493bffa8082296d62d71581a4feff1576f'
+PARTGLEE_MODEL = {
+    'model_type': 'RN50',
+    'checkpoint_dir': ROOT / 'models/PartGLEE/RN50',
+    'checkpoint_name': 'PartGLEE_RN50.pth',
+    'code_dir': ROOT / 'models/PartGLEE/source',
+    'model_config': 'projects/PartGLEE/configs/Inference/RN50/paco.yaml',
+    'text_checkpoint': 'projects/PartGLEE/clip_vit_base_patch32/pytorch_model.bin',
+}
 
 SEMANTIC_SAM_CODE_URL = 'https://github.com/UX-Decoder/Semantic-SAM.git'
 SEMANTIC_SAM_CODE_REVISION = 'e11f8b518539faea731e2744cc3e44c24572e30d'
@@ -93,7 +110,7 @@ def default_arguments(function):
             if parameter.default is not Parameter.empty}
 
 
-def make_config(method, *, device, unsam, slic, semantic_sam, min_mask_area):
+def make_config(method, *, device, unsam, slic, semantic_sam, partglee, min_mask_area):
     """Combine public controls with fixed settings and return an independent snapshot."""
     if method not in METHOD_NAMES:
         raise ValueError(f'Unknown method {method!r}; choose from {tuple(METHOD_NAMES)}')
@@ -107,6 +124,15 @@ def make_config(method, *, device, unsam, slic, semantic_sam, min_mask_area):
         settings['preprocess'] = {'input_size': 640}  # Official prepare_image default.
         settings['runtime'].update(precision='float32')
         settings['generator'] = {'level': semantic_sam['level']}
+    elif method == 'partglee':
+        settings['model'] = PARTGLEE_MODEL
+        settings['preprocess'] = {'input_size': 1024}
+        settings['runtime'].update(precision='float32')
+        settings['generator'] = {
+            'task': 'sa1b_joint', 'categories': ['object', 'part'],
+            'object_queries': 300, 'topk_object_queries': 50, 'part_queries_per_object': 10,
+            **partglee,
+        }
     else:
         settings['model'] = SAM2 if method == 'sam2' else {
             **UNSAMV2_PLUS, 'granularity': unsam['granularity']}
@@ -149,6 +175,25 @@ def validate_config(settings, method):
             granularity = settings['model']['granularity']
             if not math.isfinite(granularity) or not 0.1 <= granularity <= 1:
                 raise ValueError('granularity must be finite and in [0.1, 1]')
+        if method == 'partglee':
+            if runtime['device'] == 'cpu' or runtime['precision'] != 'float32':
+                raise ValueError('PartGLEE integration requires CUDA and float32')
+            if settings['model']['model_type'] != 'RN50':
+                raise ValueError('This integration uses the PartGLEE RN50 checkpoint')
+            if (generator['task'] != 'sa1b_joint' or generator['categories'] != ['object', 'part']
+                    or generator['object_queries'] != 300 or generator['topk_object_queries'] != 50
+                    or generator['part_queries_per_object'] != 10):
+                raise ValueError('PartGLEE uses fixed object/part categories and trained query counts')
+            for key, maximum in (('max_object_masks', 50), ('max_part_masks', 500)):
+                if type(generator[key]) is not int or not 1 <= generator[key] <= maximum:
+                    raise ValueError(f'{key} must be an integer in [1, {maximum}]')
+            for key in ('score_thresh', 'mask_nms_thresh'):
+                if (isinstance(generator[key], bool) or not isinstance(generator[key], (int, float))
+                        or not math.isfinite(generator[key]) or not 0 <= generator[key] <= 1):
+                    raise ValueError(f'{key} must be finite and in [0, 1]')
+            size = settings['preprocess']['input_size']
+            if type(size) is not int or size < 32:
+                raise ValueError('PartGLEE input_size must be an integer >= 32')
         if method == 'semantic-sam':
             if runtime['device'] == 'cpu':
                 raise ValueError('Semantic-SAM upstream inference requires CUDA')

@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dense_partition import (DensePartition, SAM21Partition, UnSAMv2PlusPartition,
-                             SemanticSAMPartition, SLICPartition)
+                             SemanticSAMPartition, PartGLEEPartition, SLICPartition)
 from config import get_config
 from common.io import export_partition, iter_masks
 from common.partition import connected_labels, resolve_masks, validate_partition
@@ -75,6 +75,7 @@ class CommonAPITest(unittest.TestCase):
     def test_factory_and_independent_configuration(self):
         for name, implementation in [('sam2', SAM21Partition), ('unsamv2-plus', UnSAMv2PlusPartition),
                                      ('semantic-sam', SemanticSAMPartition),
+                                     ('partglee', PartGLEEPartition),
                                      ('slic', SLICPartition)]:
             self.assertIsInstance(DensePartition.create(name), implementation)
         with self.assertRaises(TypeError):
@@ -152,7 +153,7 @@ class CommonAPITest(unittest.TestCase):
         masks[1, 3:5, 3:6] = True
         records = [dict(predicted_iou=.99, stability_score=.99),
                    dict(predicted_iou=.6, stability_score=.8)]
-        for method in ('sam2', 'unsamv2-plus', 'semantic-sam'):
+        for method in ('sam2', 'unsamv2-plus', 'semantic-sam', 'partglee'):
             settings = get_config(method)
             settings['postprocess']['min_mask_area'] = 0  # Inspect overlap resolution before merging.
             backend = {'generator': settings['generator']}

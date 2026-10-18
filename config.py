@@ -16,6 +16,13 @@ SEMANTIC_SAM = {
     'level': [1, 2, 3, 4, 5, 6],  # 1/2 偏语义，3 实例，4/5/6 部件；可只用 [3] 或 [6]；全部层级能提供更多互补候选
 }
 
+PARTGLEE = {
+    'max_object_masks': 50,  # 全图物体候选上限；模型内部仍使用 50 个物体 query 解析部件
+    'max_part_masks': 500,  # 全图部件候选上限，50 × 10；不是每个物体的数量
+    'score_thresh': 0.25,  # 类别概率 × Mask 内平均概率；不同于 SAM 的 predicted IoU
+    'mask_nms_thresh': 0.95,  # 只去除同层级高度重复的 Mask；物体与部件不互相抑制
+}
+
 SLIC = {
     'n_segments': 50,  # 目标区域数，越大越细
     'compactness': 5.0,  # 小值更贴颜色边界，大值形状更规则
@@ -34,4 +41,5 @@ DEBUG_IMAGES = (
 def get_config(method=DEFAULT_METHOD):
     """合并内部设置，返回本次运行的完整参数副本。"""
     return make_config(method, device=DEVICE, unsam=UNSAMV2_PLUS, slic=SLIC,
-                       semantic_sam=SEMANTIC_SAM, min_mask_area=MIN_MASK_AREA)
+                       semantic_sam=SEMANTIC_SAM, partglee=PARTGLEE,
+                       min_mask_area=MIN_MASK_AREA)

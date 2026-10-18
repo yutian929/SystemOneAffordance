@@ -17,7 +17,7 @@ from common.visualization import write_overview, write_viewer
 class DensePartition(ABC):
     """Base contract: positive contiguous IDs, complete coverage, connected masks.
 
-    Use DensePartition.create('sam2' | 'unsamv2-plus' | 'semantic-sam' | 'slic').segment(image).
+    Use DensePartition.create(method).segment(image); methods are listed in METHOD_NAMES.
     Subclasses implement _segment_rgb; this base validates every returned result.
     """
     method: str
@@ -33,7 +33,8 @@ class DensePartition(ABC):
     @staticmethod
     def create(method=DEFAULT_METHOD, config=None):
         implementations = {'sam2': SAM21Partition, 'unsamv2-plus': UnSAMv2PlusPartition,
-                           'semantic-sam': SemanticSAMPartition, 'slic': SLICPartition}
+                           'semantic-sam': SemanticSAMPartition, 'partglee': PartGLEEPartition,
+                           'slic': SLICPartition}
         if method not in implementations:
             raise ValueError(f'Unknown method {method!r}; choose from {tuple(implementations)}')
         return implementations[method](config)
@@ -80,6 +81,13 @@ class UnSAMv2PlusPartition(DensePartition):
 
 class SemanticSAMPartition(DensePartition):
     method = 'semantic-sam'
+
+    def _segment_rgb(self, rgb):
+        return self._segment_with_proposals(rgb)
+
+
+class PartGLEEPartition(DensePartition):
+    method = 'partglee'
 
     def _segment_rgb(self, rgb):
         return self._segment_with_proposals(rgb)

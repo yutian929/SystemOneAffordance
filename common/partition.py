@@ -18,7 +18,10 @@ def connected_labels(values):
 
 
 def resolve_masks(masks, records, shape):
-    """Smaller proposals own overlaps; ties use quality, stability, source order.
+    """Smaller proposals own overlaps; ties use backend quality and source order.
+
+    SAM-family proposals use predicted IoU, then stability. Other backends expose
+    their native score; it is not renamed or interpreted as a predicted IoU.
 
     owners=0 explicitly means no model proposal covered that pixel. Returning a
     partition does not imply the model predicted that residual region.
@@ -28,8 +31,9 @@ def resolve_masks(masks, records, shape):
         raise ValueError('Expected boolean masks matching records and image shape')
     areas = masks.sum(axis=(1, 2), dtype=np.int64)
     order = sorted(range(len(masks)), key=lambda i: (
-        int(areas[i]), -float(records[i]['predicted_iou']),
-        -float(records[i]['stability_score']), i))
+        int(areas[i]), -float(records[i]['predicted_iou'] if 'predicted_iou' in records[i]
+                             else records[i]['score']),
+        -float(records[i].get('stability_score', 0)), i))
     owners = np.zeros(shape, dtype=np.uint32)
     coverage = np.zeros(shape, dtype=np.uint32)
     for i in order:

@@ -48,6 +48,9 @@ def validate_source(directory):
 
 
 def checkpoint_info(settings):
+    if settings['method'] == 'partglee':
+        from common.partglee import checkpoint_info as partglee_checkpoint_info
+        return partglee_checkpoint_info(settings)
     model = settings['model']
     directory = Path(model['checkpoint_dir']).expanduser().resolve()
     script = {'sam2': 'download_sam2.py', 'unsamv2-plus': 'download_unsamv2.py',
@@ -239,6 +242,10 @@ def _semantic_worker(request):
 def _worker(request_path):
     request = json.loads(Path(request_path).read_text())
     settings = request['settings']
+    if settings['method'] == 'partglee':
+        from common.partglee import run_worker
+        run_worker(request)
+        return
     if settings['method'] == 'semantic-sam':
         _semantic_worker(request)
         return

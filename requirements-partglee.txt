@@ -1,0 +1,4 @@
+# Shared inference dependencies, retaining the current PyTorch/Transformers versions.
+-r requirements-semantic-sam.txt
+ftfy==6.3.1
+wcwidth==0.2.13
