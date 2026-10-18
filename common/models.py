@@ -48,6 +48,9 @@ def validate_source(directory):
 
 
 def checkpoint_info(settings):
+    if settings['method'] == 'mosa':
+        from common.mosa import checkpoint_info as mosa_checkpoint_info
+        return mosa_checkpoint_info(settings)
     if settings['method'] == 'partglee':
         from common.partglee import checkpoint_info as partglee_checkpoint_info
         return partglee_checkpoint_info(settings)
@@ -242,6 +245,10 @@ def _semantic_worker(request):
 def _worker(request_path):
     request = json.loads(Path(request_path).read_text())
     settings = request['settings']
+    if settings['method'] == 'mosa':
+        from common.mosa import run_worker
+        run_worker(request)
+        return
     if settings['method'] == 'partglee':
         from common.partglee import run_worker
         run_worker(request)

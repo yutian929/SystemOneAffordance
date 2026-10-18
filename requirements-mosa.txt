@@ -1,0 +1,3 @@
+# MoSA whole-image R50 inference shares these pinned dependencies.
+# No PGM, video, language encoder, or training dataset dependencies are needed.
+-r requirements-semantic-sam.txt

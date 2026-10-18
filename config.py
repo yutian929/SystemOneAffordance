@@ -23,6 +23,12 @@ PARTGLEE = {
     'mask_nms_thresh': 0.95,  # 只去除同层级高度重复的 Mask；物体与部件不互相抑制
 }
 
+MOSA = {
+    'max_masks': 1000,  # 官方整图 top-k；全图候选预算，不是每个物体的部件数量
+    'score_thresh': 0.25,  # 前景 softmax 概率 × Mask 内平均概率；0 保留所有非空候选
+    'mask_nms_thresh': 0.95,  # 默认只去除高度重复的 Mask，保留明显较小的嵌套区域；1 关闭
+}
+
 SLIC = {
     'n_segments': 50,  # 目标区域数，越大越细
     'compactness': 5.0,  # 小值更贴颜色边界，大值形状更规则
@@ -41,5 +47,5 @@ DEBUG_IMAGES = (
 def get_config(method=DEFAULT_METHOD):
     """合并内部设置，返回本次运行的完整参数副本。"""
     return make_config(method, device=DEVICE, unsam=UNSAMV2_PLUS, slic=SLIC,
-                       semantic_sam=SEMANTIC_SAM, partglee=PARTGLEE,
+                       semantic_sam=SEMANTIC_SAM, partglee=PARTGLEE, mosa=MOSA,
                        min_mask_area=MIN_MASK_AREA)

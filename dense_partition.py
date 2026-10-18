@@ -34,7 +34,7 @@ class DensePartition(ABC):
     def create(method=DEFAULT_METHOD, config=None):
         implementations = {'sam2': SAM21Partition, 'unsamv2-plus': UnSAMv2PlusPartition,
                            'semantic-sam': SemanticSAMPartition, 'partglee': PartGLEEPartition,
-                           'slic': SLICPartition}
+                           'mosa': MoSAPartition, 'slic': SLICPartition}
         if method not in implementations:
             raise ValueError(f'Unknown method {method!r}; choose from {tuple(implementations)}')
         return implementations[method](config)
@@ -88,6 +88,13 @@ class SemanticSAMPartition(DensePartition):
 
 class PartGLEEPartition(DensePartition):
     method = 'partglee'
+
+    def _segment_rgb(self, rgb):
+        return self._segment_with_proposals(rgb)
+
+
+class MoSAPartition(DensePartition):
+    method = 'mosa'
 
     def _segment_rgb(self, rgb):
         return self._segment_with_proposals(rgb)

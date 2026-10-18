@@ -9,5 +9,6 @@
 | [03 System One 与 Affordance](03_system_one_affordance_research.md) | 已有人使用这些模型做 Affordance 吗？哪些工作最接近我们的分割任务？ |
 | [04 最小 Affordance 决策测试](04_minimal_affordance_test.md) | 区域独立判断与点级前后景判断，怎样预测指令对应的多个有效区域？ |
 | [05 方法 D：初版流程、结果诊断与改进](05_method_d_analysis_and_improvements.md) | D 的输入输出和中间变量是什么？初版如何逐步执行，已有结果支持哪些改进方向？ |
+| [06 无类别部件分割方法接入调研](06_class_agnostic_part_segmentation_methods.md) | HASSOD、MoSA、DiffCut、CAST 等是否满足单图无类别输入，怎样接入和评估多物体部件划分？ |
 
 返回 [仓库首页](../README.md)。

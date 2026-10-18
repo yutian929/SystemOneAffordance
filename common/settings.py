@@ -9,7 +9,25 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 METHOD_NAMES = {'sam2': 'SAM 2.1 small', 'unsamv2-plus': 'UnSAMv2+',
-                'semantic-sam': 'Semantic-SAM', 'partglee': 'PartGLEE RN50', 'slic': 'SLIC'}
+                'semantic-sam': 'Semantic-SAM', 'partglee': 'PartGLEE RN50',
+                'mosa': 'MoSA R50', 'slic': 'SLIC'}
+
+MOSA_CODE_URL = 'https://github.com/360CVGroup/MoSA.git'
+MOSA_CODE_REVISION = '7909eed2516607b40653fa5cd88ba23147131850'
+MOSA_WEIGHT_REVISION = 'c915f4f7020c88b8a1e09095ab89396216c96bf5'
+# Official Hugging Face LFS SHA-256, verified against the downloaded file.
+MOSA_CHECKPOINT_SHA256 = '24bcd6610568db5c73b8cb25b9911b8c77b2489a70eca0f14d65b67333eb15db'
+MOSA_DETECTRON_URL = 'https://github.com/facebookresearch/detectron2.git'
+MOSA_DETECTRON_REVISION = 'd1e04565d3bec8719335b88be9e9b961bf3ec464'  # v0.6
+MOSA_MODEL = {
+    'model_type': 'whole_image_R50',
+    'checkpoint_dir': ROOT / 'models/MoSA/whole-image',
+    'checkpoint_name': 'whole_image_segmentation.pth',
+    'code_dir': ROOT / 'models/MoSA/source',
+    'detectron_dir': ROOT / 'models/MoSA/detectron2',
+    'model_config': ('Adaption_to_Segment_Anything/whole_image_segmentation/'
+                     'configs/maskformer2_R50_bs16_8ep.yaml'),
+}
 
 PARTGLEE_CODE_URL = 'https://github.com/ProvenceStar/PartGLEE.git'
 PARTGLEE_CODE_REVISION = '8c6b83e0be076e8fe640943096059ee5c180de0e'
@@ -110,7 +128,7 @@ def default_arguments(function):
             if parameter.default is not Parameter.empty}
 
 
-def make_config(method, *, device, unsam, slic, semantic_sam, partglee, min_mask_area):
+def make_config(method, *, device, unsam, slic, semantic_sam, partglee, mosa, min_mask_area):
     """Combine public controls with fixed settings and return an independent snapshot."""
     if method not in METHOD_NAMES:
         raise ValueError(f'Unknown method {method!r}; choose from {tuple(METHOD_NAMES)}')
@@ -133,6 +151,12 @@ def make_config(method, *, device, unsam, slic, semantic_sam, partglee, min_mask
             'object_queries': 300, 'topk_object_queries': 50, 'part_queries_per_object': 10,
             **partglee,
         }
+    elif method == 'mosa':
+        settings['model'] = MOSA_MODEL
+        settings['preprocess'] = {'short_edge': 1024, 'max_size': 2048}
+        settings['runtime'].update(precision='float32')
+        settings['generator'] = {'num_queries': 2000, 'num_classes': 1,
+                                 'mask_batch_size': 16, **mosa}
     else:
         settings['model'] = SAM2 if method == 'sam2' else {
             **UNSAMV2_PLUS, 'granularity': unsam['granularity']}
@@ -194,6 +218,24 @@ def validate_config(settings, method):
             size = settings['preprocess']['input_size']
             if type(size) is not int or size < 32:
                 raise ValueError('PartGLEE input_size must be an integer >= 32')
+        if method == 'mosa':
+            if runtime['device'] == 'cpu' or runtime['precision'] != 'float32':
+                raise ValueError('MoSA integration requires CUDA and float32')
+            if settings['model']['model_type'] != 'whole_image_R50':
+                raise ValueError('This integration uses the MoSA whole-image R50 checkpoint')
+            if generator['num_queries'] != 2000 or generator['num_classes'] != 1:
+                raise ValueError('MoSA uses 2000 trained queries and one foreground class')
+            for key, maximum in (('max_masks', 2000), ('mask_batch_size', 2000)):
+                if type(generator[key]) is not int or not 1 <= generator[key] <= maximum:
+                    raise ValueError(f'{key} must be an integer in [1, {maximum}]')
+            for key in ('score_thresh', 'mask_nms_thresh'):
+                if (isinstance(generator[key], bool) or not isinstance(generator[key], (int, float))
+                        or not math.isfinite(generator[key]) or not 0 <= generator[key] <= 1):
+                    raise ValueError(f'{key} must be finite and in [0, 1]')
+            short_edge, max_size = (settings['preprocess'][key] for key in ('short_edge', 'max_size'))
+            if (type(short_edge) is not int or type(max_size) is not int
+                    or not 32 <= short_edge <= max_size):
+                raise ValueError('MoSA requires integer sizes with 32 <= short_edge <= max_size')
         if method == 'semantic-sam':
             if runtime['device'] == 'cpu':
                 raise ValueError('Semantic-SAM upstream inference requires CUDA')
