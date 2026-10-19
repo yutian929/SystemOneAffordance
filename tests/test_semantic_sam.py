@@ -2,7 +2,9 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +12,8 @@ import numpy as np
 
 import config
 from dense_partition import DensePartition
-from common.models import checkpoint_info, resize_semantic_rgb, restore_semantic_proposals
+from common.models import (checkpoint_info, resize_semantic_rgb, restore_semantic_proposals,
+                           _use_semantic_device_nms)
 
 
 class SemanticSAMTest(unittest.TestCase):
@@ -81,6 +84,60 @@ class SemanticSAMTest(unittest.TestCase):
                 (Path(temporary) / filename).write_text(json.dumps(data))
             with self.assertRaisesRegex(ValueError, 'SHA-256'):
                 checkpoint_info(settings)
+
+    def test_semantic_nms_moves_only_categories_to_box_device(self):
+        import torch
+        from torchvision.ops import boxes as box_ops
+
+        module = types.ModuleType('fixture_semantic_generator')
+        generator = type('FixtureGenerator', (), {'__module__': module.__name__})
+        # Meta tensors exercise distinct devices without allocating CUDA memory.
+        boxes = torch.empty((3, 4), device='meta')
+        scores = torch.empty(3, device='meta')
+        categories = torch.tensor([0., 1., 0.], device='cpu')
+        returned = object()
+        with patch.dict(sys.modules, {module.__name__: module}), \
+                patch.object(box_ops, 'batched_nms', return_value=returned) as original:
+            _use_semantic_device_nms(generator)
+            self.assertIs(box_ops.batched_nms, original)
+            result = module.batched_nms(boxes, scores, categories, iou_threshold=.65)
+            self.assertIs(result, returned)
+            original.assert_called_once()
+            actual_boxes, actual_scores, actual_categories, threshold = original.call_args.args
+            self.assertIs(actual_boxes, boxes)
+            self.assertIs(actual_scores, scores)
+            self.assertEqual(actual_categories.device, boxes.device)
+            self.assertEqual(actual_categories.dtype, categories.dtype)
+            self.assertEqual(actual_categories.shape, categories.shape)
+            self.assertEqual(threshold, .65)
+            self.assertEqual(categories.device.type, 'cpu')
+            self.assertEqual(categories.tolist(), [0., 1., 0.])
+
+    def test_semantic_nms_preserves_empty_small_and_large_batch_results(self):
+        import torch
+        from torchvision.ops import boxes as box_ops
+
+        module = types.ModuleType('fixture_semantic_generator')
+        generator = type('FixtureGenerator', (), {'__module__': module.__name__})
+        original = box_ops.batched_nms
+        with patch.dict(sys.modules, {module.__name__: module}):
+            _use_semantic_device_nms(generator)
+            _use_semantic_device_nms(generator)  # Reinstallation must not wrap torchvision globally.
+            self.assertIs(box_ops.batched_nms, original)
+            for count in (0, 12, 5001):
+                with self.subTest(count=count):
+                    boxes = torch.tensor([[0., 0., 10., 10.]]).repeat(count, 1)
+                    scores = torch.arange(count, dtype=torch.float32)
+                    categories = (torch.arange(count) % 3).to(torch.float32)
+                    # Identical boxes retain only the highest-scored member of each category.
+                    expected = list(range(count - 1, max(-1, count - 4), -1))
+                    with patch.object(box_ops, '_batched_nms_vanilla',
+                                      wraps=box_ops._batched_nms_vanilla) as vanilla:
+                        actual = module.batched_nms(boxes, scores, categories, .5)
+                    self.assertEqual(vanilla.call_count, int(count == 5001))
+                    self.assertEqual(actual.tolist(), expected)
+                    self.assertTrue(torch.equal(actual, original(boxes, scores, categories, .5)))
+                    self.assertEqual(actual.device.type, 'cpu')
 
 
 if __name__ == '__main__':

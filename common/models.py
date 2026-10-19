@@ -324,6 +324,21 @@ def _use_semantic_pytorch_attention():
     sys.modules[module.__name__] = module
 
 
+def _use_semantic_device_nms(generator_class):
+    """Align upstream's CPU category IDs with its boxes before torchvision NMS.
+
+    Small batches implicitly move IDs in torchvision's coordinate-offset path;
+    its large-batch path requires them on the boxes' device. Replace only the
+    Semantic-SAM generator module's imported symbol, preserving torchvision NMS.
+    """
+    from torchvision.ops.boxes import batched_nms
+
+    def device_batched_nms(boxes, scores, idxs, iou_threshold):
+        return batched_nms(boxes, scores, idxs.to(device=boxes.device), iou_threshold)
+
+    sys.modules[generator_class.__module__].batched_nms = device_batched_nms
+
+
 def _load_semantic(request):
     """Use upstream's utils package alongside the project's common package."""
     settings = request['settings']
@@ -354,6 +369,7 @@ def _load_semantic(request):
     from utils.arguments import load_opt_from_config_file  # Upstream Semantic-SAM package.
     if not Path(semantic_sam.__file__).resolve().is_relative_to(code):
         raise RuntimeError('Loaded the wrong Semantic-SAM source')
+    _use_semantic_device_nms(SemanticSamAutomaticMaskGenerator)
 
     start = time.perf_counter()
     options = load_opt_from_config_file(str(code / resources['model_config']))

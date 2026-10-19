@@ -2,6 +2,8 @@
 
 当前实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）** 及其 **UMD Affordance 分区评测**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+、Semantic-SAM、PartGLEE RN50、MoSA R50 和 SLIC，统一通过 `DensePartition` 接口调用。评测器使用 UMD 标签评价这些区域的表达能力，尚未接入任务决策模型。
 
+最终采用 **MoSA whole-image R50**，Python API 默认使用第 5 轮选定的配置：`max_masks=250`、`score_thresh=0.25`、`mask_nms_thresh=0.95`。720 张人工标注的调参已停止，共完成五轮完整比较；结果与选择理由见 [07：UMD 720 张评测报告](docs/07_umd720_benchmark_report.md)。命令行比较入口不指定 `--method` 时仍运行全部六种方法；只运行最终方案可用 `python dense_partition.py --method mosa`。
+
 ## 代码结构
 
 ```text
@@ -114,7 +116,7 @@ python scripts/download_unsamv2.py
 
 | 配置 | 用途（当前值以 `config.py` 为准） |
 | --- | --- |
-| `DEFAULT_METHOD` | Python API 默认 `slic`；命令行未指定 `--method` 时运行全部方法 |
+| `DEFAULT_METHOD` | Python API 默认 `mosa`；命令行未指定 `--method` 时运行全部方法 |
 | `DEVICE` | 当前 `cuda:1`，单卡机器改为 `cuda:0`。SLIC 始终使用 CPU |
 | `MIN_MASK_AREA` | 所有方法统一的后处理阈值，默认 `16`：面积严格小于 16 个原图像素的区域并入邻居；`0` 关闭 |
 | `UNSAMV2_PLUS.granularity` | 范围 `[0.1, 1.0]`，默认 `0.2`；越小倾向越细，但过小可能漏掉物体/部件，并非越小越好；HF Demo 初始值为 `0.15` |
@@ -124,7 +126,7 @@ python scripts/download_unsamv2.py
 | `PARTGLEE.max_object_masks` / `max_part_masks` | 全图候选输出上限，默认 `50` / `500`；不改变训练时的 query 数，不代表真实物体或部件数量 |
 | `PARTGLEE.score_thresh` | 默认 `0.25`；过滤类别概率 × Mask 内平均概率低于阈值的候选 |
 | `PARTGLEE.mask_nms_thresh` | 默认 `0.95`；同层级 Mask 的 IoU 严格超过阈值时保留高分候选，物体与部件不互相抑制 |
-| `MOSA.max_masks` | 默认 `1000`，按前景分类概率选取整图 top-k；范围 `[1, 2000]`，不改变网络训练时的 2000 个 query |
+| `MOSA.max_masks` | 默认 `250`，按前景分类概率选取整图 top-k；范围 `[1, 2000]`，不改变网络训练时的 2000 个 query |
 | `MOSA.score_thresh` | 默认 `0.25`，过滤前景 softmax 概率 × Mask 内平均概率低于阈值的候选；`0` 关闭分数过滤 |
 | `MOSA.mask_nms_thresh` | 默认 `0.95`，按 Mask IoU 去除高度重复候选；`1` 关闭，显著更小的嵌套部件保留 |
 | `SLIC` | `n_segments` 越大越细；`compactness` 控制形状规则性，`sigma` 控制平滑；目标数不等于最终 Mask 数 |
@@ -278,11 +280,13 @@ python affordance_benchmark.py --manifest benchmarks/umd/manifest.json --split t
 
 五项指标为最优区域组合的 Oracle IoU、IoU ≥ 0.8 的比例、最终区域数 K、代表点命中率和每图分割耗时。多个碎片可以合并成一个功能部位；分区和代表点生成都不读取 GT。`-1` 像素按本项目约定忽略，背景参与误选惩罚，不存在的功能类别跳过。Tools 和 Clutter 分开统计，按帧、实例/场景、有效功能类别分层平均。
 
-结果自动保存在 `outputs/affordance_benchmark_年月日_时分秒_微秒/`，无需传入 `--output`：`index.html` 可切换图片和功能、查看原尺寸与代表点；`summary.csv`、`per_class.csv`、`per_sequence.csv`、`scores.csv`、`image_metrics.csv` 分别保存汇总与明细；`run.json` 保存实际配置、版本、耗时口径和失败记录；`manifest.json` 保存输入路径、哈希和标签信息。每次分割都保存原始候选、最终分区和各功能的 GT/最优组合/误差图。当前每次运行重新分割，不自动复用旧结果。
+结果自动保存在 `outputs/affordance_benchmark_年月日_时分秒_微秒/`，无需传入 `--output`：`index.html` 可切换图片和功能、查看原尺寸与代表点；`summary.csv`、`per_class.csv`、`per_sequence.csv`、`scores.csv`、`image_metrics.csv` 分别保存汇总与明细；`run.json` 保存实际配置、版本、耗时口径和失败记录；`manifest.json` 保存输入路径、哈希和标签信息。普通模式逐图保存原始候选、最终分区和各功能的 GT/最优组合/误差图。
+
+大批量评测使用 `--streaming`：每张图的最终标签和完整评分逐项提交到 `results.sqlite`，只为 `--export-limit` 指定数量的样本导出完整图片（默认 12 张）。`--config 参数.json` 接受“方法名 → 嵌套配置覆盖”，同时启用流式模式。`--resume --output 已有目录` 跳过已经成功的任务，重试失败或缺失任务；恢复会核对清单、文件哈希、参数、方法、示例选择、实现版本和环境。同一输出目录只允许一个流式运行进程。
 
 每个模型的一次性启动时间记录在 `run.json.initialization`（分割脚本为 `summary.json.initialization`）；评测页面分别展示首次启动时间和单张分割时间。`wall_seconds` / `mean_wall_seconds` 不再包含模型加载，但包含进程间数据传递、推理及分区后处理；不包含结果保存、评测和绘图。没有额外预热，首张推理也计入平均值。耗时协议版本为 2，不能直接与旧版每图重新加载的时间混用。
 
-默认 debug 和 `--image` 都是开发评测，标注身份记为 `unknown`。正式清单需将样本标记为 `test`、`manual`，并填写非空 `annotation_evidence`；程序记录用户提供的依据，不自动判定哪些帧为人工标注。混合 dev/test 清单必须用 `--split` 选择，Tools 同一实例不能跨两组。运行中的个别方法失败后继续其他任务，记录失败并返回非零退出码；未完成的方法/子集汇总分数留空，逐图成功结果仍保留。格式与指标解释见 [06：UMD 分割评价](docs/06_umd_affordance_partition_benchmark.md)。
+默认 debug 和 `--image` 都是开发评测，标注身份记为 `unknown`。正式清单需将样本标记为 `test`、`manual`，并填写非空 `annotation_evidence`。流式模式对 `manual` 样本额外检查 MAT 内的 `gt_type`。本地已核实人工标注共 9,922 张（Tools 9,632、Clutter 290）；当前从中固定抽取 720 张做多轮调参，不能作为独立测试成绩。混合 dev/test 清单必须用 `--split` 选择，Tools 同一实例不能跨两组。运行中的个别方法失败后继续其他任务，记录失败并返回非零退出码；未完成的方法/子集汇总分数留空，逐图成功结果仍保留。格式与指标解释见 [06：UMD 分割评价](docs/06_umd_affordance_partition_benchmark.md)。
 
 本次验证通过 55 项单元/集成测试，包括最优组合与穷举结果一致、忽略像素、分组平均、失败记录、两个入口无参数运行、模型按顺序复用、进程异常和中断清理。五张真实 debug 图、六种方法共 30 次分割全部成功；每种学习模型的五张图片使用同一个进程，完成后均已退出。30 份最终标签与旧流程逐像素一致。查看 [常驻模型开发集评测页面](outputs/affordance_benchmark_20261018_205942_939471/index.html) / [汇总表](outputs/affordance_benchmark_20261018_205942_939471/summary.csv)。该小样本仅验证实现，未覆盖全部七类，不能作为正式性能排名。
 

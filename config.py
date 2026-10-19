@@ -1,7 +1,7 @@
 """日常配置；各方法的主要调节项集中在这里。"""
 from common.settings import ROOT, METHOD_NAMES, make_config, validate_config
 
-DEFAULT_METHOD = 'slic'  # Python API 的默认方法；命令行未指定 --method 时运行全部方法
+DEFAULT_METHOD = 'mosa'  # 最终采用 MoSA；命令行未指定 --method 时仍运行全部方法
 OUTPUT_DIR = ROOT / 'outputs'  # 两个命令行入口共用的输出根目录；每次自动创建“脚本名_时间戳”子目录
 DEVICE = 'cuda:1'  # 单卡改为 cuda:x；SLIC 使用 CPU
 MIN_MASK_AREA = 16  # 原图像素数；小于此面积的最终区域并入邻居，0 关闭；适用于全部方法
@@ -24,8 +24,8 @@ PARTGLEE = {
 }
 
 MOSA = {
-    'max_masks': 500,  # 官方整图 top-k；全图候选预算，不是每个物体的部件数量
-    'score_thresh': 0.35,  # 前景 softmax 概率 × Mask 内平均概率；0 保留所有非空候选
+    'max_masks': 250,  # UMD720 第5轮选型；全图候选预算，不是每个物体的部件数量
+    'score_thresh': 0.25,  # 前景 softmax 概率 × Mask 内平均概率；0 保留所有非空候选
     'mask_nms_thresh': 0.95,  # 默认只去除高度重复的 Mask，保留明显较小的嵌套区域；1 关闭
 }
 

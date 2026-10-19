@@ -8,6 +8,7 @@ import argparse
 from collections import defaultdict
 from copy import deepcopy
 import csv
+import fcntl
 from datetime import datetime, timezone
 from fractions import Fraction
 from importlib.metadata import version
@@ -15,17 +16,21 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
+import signal
+import sqlite3
 import subprocess
 import sys
 import time
 import traceback
+import zlib
 
 import numpy as np
 from PIL import Image
 from scipy.io import loadmat
 from skimage.measure import label as component_labels
 
-from config import DEBUG_IMAGES, METHOD_NAMES, OUTPUT_DIR
+from config import DEBUG_IMAGES, METHOD_NAMES, OUTPUT_DIR, get_config
 from common.io import file_digest, image_digest, read_image, write_json
 from common.partition import validate_partition
 from common.settings import ROOT
@@ -115,18 +120,29 @@ def _sequence_mean(rows, key):
 
 def aggregate_metrics(samples, methods, images, scores, class_names):
     """Frame -> sequence -> class macro averages, with incomplete groups blanked."""
+    sample_groups, sequence_ids = defaultdict(set), defaultdict(set)
+    image_groups, score_groups = defaultdict(list), defaultdict(list)
+    for sample in samples:
+        sample_groups[sample['subset']].add(sample['sample_id'])
+        sequence_ids[sample['subset'], sample['sequence_id']].add(sample['sample_id'])
+    for row in images:
+        image_groups[row['subset'], row['method']].append(row)
+    for row in scores:
+        score_groups[row['subset'], row['method'], row['affordance_id']].append(row)
     summaries, per_class, per_sequence = [], [], []
-    for subset in sorted({s['subset'] for s in samples}):
-        expected = {s['sample_id'] for s in samples if s['subset'] == subset}
-        sequences = sorted({s['sequence_id'] for s in samples if s['subset'] == subset})
+    for subset, expected in sorted(sample_groups.items()):
+        sequences = sorted(seq for group, seq in sequence_ids if group == subset)
         for method in methods:
-            ir = [r for r in images if r['subset'] == subset and r['method'] == method]
-            sr = [r for r in scores if r['subset'] == subset and r['method'] == method]
-            complete = {r['sample_id'] for r in ir} == expected
+            ir = image_groups[subset, method]
+            completed_ids = {r['sample_id'] for r in ir}
+            complete = completed_ids == expected
             status = 'complete' if complete else 'incomplete'
             class_rows = []
             for class_id, name in class_names.items():
-                rows = [r for r in sr if r['affordance_id'] == class_id]
+                rows = score_groups[subset, method, class_id]
+                by_sequence = defaultdict(list)
+                for row in rows:
+                    by_sequence[row['sequence_id']].append(row)
                 item = dict(subset=subset, method=method, affordance_id=class_id,
                             affordance=name, status=status, image_count=len(rows),
                             sequence_count=len({r['sequence_id'] for r in rows}),
@@ -135,10 +151,8 @@ def aggregate_metrics(samples, methods, images, scores, class_names):
                 class_rows.append(item)
                 per_class.append(item)
                 for sequence in sequences:
-                    seq_rows = [r for r in rows if r['sequence_id'] == sequence]
-                    seq_ids = {s['sample_id'] for s in samples
-                               if s['subset'] == subset and s['sequence_id'] == sequence}
-                    seq_complete = seq_ids <= {r['sample_id'] for r in ir}
+                    seq_rows = by_sequence[sequence]
+                    seq_complete = sequence_ids[subset, sequence] <= completed_ids
                     per_sequence.append({**item, 'sequence_id': sequence,
                         'status': 'complete' if seq_complete else 'incomplete',
                         'image_count': len(seq_rows), 'sequence_count': int(bool(seq_rows)),
@@ -162,6 +176,19 @@ def write_csv(path, rows, fields):
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(rows)
+
+
+def merged_config(base, overrides):
+    """Apply a JSON parameter profile without modifying global defaults."""
+    result = deepcopy(base)
+    for key, value in overrides.items():
+        result[key] = (merged_config(result.get(key, {}), value)
+                       if isinstance(value, dict) else deepcopy(value))
+    return result
+
+
+def json_plain(value):
+    return json.loads(json.dumps(value, default=str, allow_nan=False))
 
 
 def _safe_id(value, field):
@@ -228,10 +255,14 @@ def _provenance():
         except (OSError, subprocess.SubprocessError):
             return None
     return dict(python=sys.executable, platform=platform.platform(),
-                packages={name: version(name) for name in ('numpy', 'scipy', 'scikit-image', 'Pillow')},
+                packages={name: version(name) for name in ('numpy', 'scipy', 'scikit-image', 'Pillow', 'torch')},
                 git_commit=command(['git', 'rev-parse', 'HEAD']),
                 git_status=command(['git', 'status', '--short']),
                 script_sha256=file_digest(Path(__file__)),
+                implementation_sha256={name: file_digest(ROOT / name) for name in (
+                    'affordance_benchmark.py', 'dense_partition.py', 'common/models.py',
+                    'common/partition.py', 'common/result.py', 'common/io.py',
+                    'common/mosa.py', 'common/partglee.py', 'common/settings.py')},
                 gpus=command(['nvidia-smi', '--query-gpu=index,name,driver_version,memory.total',
                               '--format=csv,noheader']))
 
@@ -411,6 +442,244 @@ class AffordanceBenchmark(ABC):
             write_benchmark_viewer(output, run, summary, views, self.class_names)
         return run
 
+    def run_streaming(self, manifest, output, methods=None, *, configs=None, resume=False,
+                      export_limit=12, checkpoint_interval=100):
+        """Exclusively own one run, including across independent resume processes."""
+        output = Path(output).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Outside output: invalid inputs do not create a misleading partial run.
+        with (output.parent / f'.{output.name}.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError(f'Another process is running this output: {output}') from error
+            return self._run_streaming(manifest, output, methods, configs=configs, resume=resume,
+                export_limit=export_limit, checkpoint_interval=checkpoint_interval)
+
+    def _run_streaming(self, manifest, output, methods=None, *, configs=None, resume=False,
+                       export_limit=12, checkpoint_interval=100):
+        """Durable large runs: every label/score in SQLite, a fixed set of visual examples.
+
+        Resume checks input hashes and requested settings, then retries only missing
+        or failed jobs. A successful SQLite transaction is the unit of completion.
+        """
+        if type(export_limit) is not int or export_limit < 0 or checkpoint_interval < 1:
+            raise ValueError('export_limit must be nonnegative and checkpoint_interval positive')
+        manifest = load_manifest(manifest)
+        samples = manifest['samples']
+        methods = list(dict.fromkeys(METHOD_NAMES if methods is None else methods))
+        if not methods or any(m not in METHOD_NAMES for m in methods):
+            raise ValueError('Unknown or empty methods')
+        configs = configs or {}
+        if not isinstance(configs, dict) or set(configs) - set(METHOD_NAMES):
+            raise ValueError('configs must map known method names to parameter overrides')
+        requested = {m: merged_config(get_config(m), configs.get(m, {})) for m in methods}
+        engines = {m: DensePartition.create(m, config=requested[m]) for m in methods}
+        requested = json_plain(requested)
+        output = Path(output).expanduser().resolve()
+        if output.exists() and not resume:
+            raise FileExistsError(f'Output directory must be new: {output}')
+        if resume and not (output / 'run.json').is_file():
+            raise ValueError('Resume requires an existing streaming run')
+        seen, duplicates = set(), 0
+        preserve_duplicates = manifest.get('evaluation_scope') == 'full_dataset_tuning'
+        for sample in samples:
+            rgb = read_image(sample['rgb'])
+            gt = self.load_ground_truth(sample, rgb.shape[:2])
+            digest, label_digest = image_digest(rgb), file_digest(sample['label'])
+            for key, actual in (('image_sha256', digest), ('label_sha256', label_digest)):
+                if key in sample and sample[key] != actual:
+                    raise ValueError(f"Frozen input changed: {sample['sample_id']} ({key})")
+            if sample['annotation_status'] == 'manual':
+                kind = loadmat(sample['label'], variable_names=['gt_type'], squeeze_me=True).get('gt_type')
+                if not isinstance(kind, str) or kind != 'manual':
+                    raise ValueError(f"Manual sample lacks gt_type=manual: {sample['sample_id']}")
+            if digest in seen:
+                duplicates += 1
+                if not preserve_duplicates:
+                    raise ValueError('Duplicate RGB content in selected samples')
+            seen.add(digest)
+            sample.update(image_sha256=digest, label_sha256=label_digest, shape=list(gt.shape),
+                          affordance_ids=[i for i in self.class_names if np.any(gt == i)])
+        count = min(export_limit, len(samples))
+        example_ids = {samples[int((i + .5) * len(samples) / count)]['sample_id'] for i in range(count)}
+        now = datetime.now(timezone.utc).isoformat()
+        provenance = _provenance()
+        if resume:
+            run = json.loads((output / 'run.json').read_text())
+            saved = json.loads((output / 'manifest.json').read_text())
+            if (saved != manifest or run.get('requested_config') != requested
+                    or run['methods'] != methods or run.get('storage') != 'sqlite_labels_v1'
+                    or set(run['visual_sample_ids']) != example_ids):
+                raise ValueError('Resume manifest, configuration, methods or export selection changed')
+            if not (output / 'results.sqlite').is_file():
+                raise ValueError('Resume database missing')
+            for key in ('python', 'packages', 'implementation_sha256'):
+                if run['provenance'].get(key) != provenance[key]:
+                    raise ValueError(f'Resume code/environment changed ({key}); start a new run')
+        else:
+            output.mkdir(parents=True)
+            write_json(output / 'manifest.json', manifest)
+            run = dict(dataset=self.dataset, split=samples[0]['split'], started_at=now,
+                methods=methods, requested_config=requested, config=deepcopy(requested),
+                initialization={}, initialization_history=[], provenance=provenance,
+                storage='sqlite_labels_v1', visual_sample_ids=sorted(example_ids),
+                expected_jobs=len(samples) * len(methods), duplicate_rgb_frames=duplicates,
+                protocol=dict(version=2, ignore_label=self.ignore_label, background_label=0,
+                    success_iou=0.8, connectivity=4, absent_class='skip',
+                    aggregation='frame mean -> sequence mean -> observed class macro mean',
+                    incomplete_groups='summary values blank; individual rows retained',
+                    timing='segment(rgb) after initialization; excludes evaluation/export',
+                    warmup='none; first-image inference included',
+                    model_lifetime='one worker per method per session, then close',
+                    input='RGB only; GT used exclusively for evaluation'))
+        run.update(status='running', completed=False, resumed_at=now if resume else None)
+        connection = sqlite3.connect(output / 'results.sqlite')
+        connection.execute('PRAGMA journal_mode=WAL')
+        connection.execute('''CREATE TABLE IF NOT EXISTS jobs (
+            sample_id TEXT, method TEXT, status TEXT, image_json TEXT, scores_json TEXT,
+            labels_zlib BLOB, shape_json TEXT, view_json TEXT, error_json TEXT,
+            PRIMARY KEY(sample_id, method))''')
+        completed = set(connection.execute("SELECT sample_id,method FROM jobs WHERE status='ok'"))
+
+        def record(sample, method, *, image=None, scores=None, result=None, view=None, error=None):
+            blob = (zlib.compress(np.asarray(result.labels, dtype='<u4').tobytes(), level=1)
+                    if result is not None else None)
+            with connection:
+                connection.execute('INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?)', (
+                    sample['sample_id'], method, 'error' if error else 'ok',
+                    json.dumps(image), json.dumps(scores), blob, json.dumps(sample['shape']),
+                    json.dumps(view), json.dumps(error)))
+            if error is None:
+                completed.add((sample['sample_id'], method))
+            else:
+                completed.discard((sample['sample_id'], method))
+
+        def progress():
+            run['successful_jobs'] = connection.execute("SELECT count(*) FROM jobs WHERE status='ok'").fetchone()[0]
+            run['failures'] = [json.loads(row[0]) for row in connection.execute(
+                "SELECT error_json FROM jobs WHERE status='error' ORDER BY method,sample_id")]
+            run['updated_at'] = datetime.now(timezone.utc).isoformat()
+            # Atomic replacement leaves readable progress after process/machine failure.
+            write_json(output / 'run.json.tmp', run)
+            (output / 'run.json.tmp').replace(output / 'run.json')
+
+        def reports():
+            images, scores = [], []
+            views = {s['sample_id']: dict(sample_id=s['sample_id'], subset=s['subset'], shape=s['shape'],
+                     affordance_ids=s['affordance_ids'], results={}) for s in samples if s['sample_id'] in example_ids}
+            stored = {(sid, method): (status, ir, sr, view, error) for sid, method, status, ir, sr, view, error
+                      in connection.execute('SELECT sample_id,method,status,image_json,scores_json,view_json,error_json FROM jobs')}
+            # Stable sample -> method ordering matches the original CSV contract.
+            for sample in samples:
+                sid = sample['sample_id']
+                for method in methods:
+                    row = stored.get((sid, method))
+                    if row is None:
+                        continue
+                    status, ir, sr, view, error = row
+                    if status == 'ok':
+                        images.append(json.loads(ir))
+                        scores.extend(json.loads(sr))
+                    if sid in views:
+                        views[sid]['results'][method] = (json.loads(view) if status == 'ok'
+                                                       else {'error': json.loads(error)['error']})
+            summary, classes, sequences = aggregate_metrics(samples, methods, images, scores, self.class_names)
+            for name, rows, fields in (
+                ('image_metrics.csv', images, IMAGE_FIELDS), ('scores.csv', scores, SCORE_FIELDS),
+                ('summary.csv', summary, SUMMARY_FIELDS), ('per_class.csv', classes, CLASS_FIELDS),
+                ('per_sequence.csv', sequences, ('sequence_id', *CLASS_FIELDS))):
+                write_csv(output / name, rows, fields)
+            write_benchmark_viewer(output, run, summary, list(views.values()), self.class_names)
+
+        progress()
+        jobs_this_session = 0
+        try:
+            for method, engine in engines.items():
+                pending = [s for s in samples if (s['sample_id'], method) not in completed]
+                if not pending:
+                    continue
+                print(f'{METHOD_NAMES[method]}: initializing once; {len(pending)} pending images ...', flush=True)
+                try:
+                    try:
+                        initialization = engine.start()
+                        run['initialization'][method] = initialization
+                        run['initialization_history'].append(dict(method=method, started_at=now, **initialization))
+                        run['config'][method] = json_plain(engine.config)
+                        progress()
+                    except Exception as error:
+                        failure = dict(method=method, stage='initialize', error=f'{type(error).__name__}: {error}',
+                                       traceback=traceback.format_exc())
+                        for sample in pending:
+                            record(sample, method, error=dict(sample_id=sample['sample_id'], **failure))
+                        print(f"FAILED: {failure['error']}", file=sys.stderr, flush=True)
+                        continue
+                    for sample in pending:
+                        stage = 'input'
+                        try:
+                            rgb = read_image(sample['rgb'])
+                            gt = self.load_ground_truth(sample, rgb.shape[:2])
+                            if (image_digest(rgb) != sample['image_sha256']
+                                    or file_digest(sample['label']) != sample['label_sha256']):
+                                raise ValueError('Input changed since preflight')
+                            stage = 'segment'
+                            start = time.perf_counter()
+                            result = engine.segment(rgb)
+                            wall = time.perf_counter() - start
+                            stage = 'evaluate'
+                            evaluation = self.evaluate(result.labels, gt)
+                            identity = dict(sample_id=sample['sample_id'], subset=sample['subset'],
+                                            sequence_id=sample['sequence_id'], method=method)
+                            image = dict(**identity, region_count=result.region_count, wall_seconds=wall,
+                                **{key: evaluation[key] for key in ('valid_pixels','ignored_pixels','ignored_fraction')})
+                            scores = [{**identity, **row} for row in evaluation['scores']]
+                            view = None
+                            if sample['sample_id'] in example_ids:
+                                stage = 'export'
+                                partition = Path('partitions') / sample['sample_id'] / method
+                                directory = Path('evaluations') / sample['sample_id'] / method
+                                # Only failed/uncommitted jobs reach this path on resume.
+                                for path in (output / partition, output / directory):
+                                    if path.exists():
+                                        shutil.rmtree(path)
+                                result.save(output / partition)
+                                self._save_evaluation(output / directory, result, gt, evaluation)
+                                view = dict(partition=partition.as_posix(), evaluation=directory.as_posix(),
+                                    region_count=result.region_count, wall_seconds=wall, points=evaluation['points'],
+                                    scores=evaluation['scores'], ignored_fraction=evaluation['ignored_fraction'])
+                            stage = 'persist'
+                            record(sample, method, image=image, scores=scores, result=result, view=view)
+                            del result
+                        except Exception as error:
+                            failure = dict(sample_id=sample['sample_id'], method=method, stage=stage,
+                                error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
+                            record(sample, method, error=failure)
+                            print(f"FAILED {method} {sample['sample_id']}: {error}", file=sys.stderr, flush=True)
+                        else:
+                            # A broken output stream must not overwrite committed results.
+                            print(f"{method} {sample['sample_id']}: {wall:.2f}s, K={image['region_count']}", flush=True)
+                        jobs_this_session += 1
+                        if jobs_this_session % checkpoint_interval == 0:
+                            progress()
+                            reports()
+                finally:
+                    engine.close()
+                    progress()
+                    reports()
+            run['completed'] = connection.execute("SELECT count(*) FROM jobs WHERE status='ok'").fetchone()[0] == run['expected_jobs']
+            run['status'] = 'complete' if run['completed'] else 'incomplete'
+        except BaseException:
+            run['status'] = 'interrupted'
+            raise
+        finally:
+            run['finished_at'] = datetime.now(timezone.utc).isoformat()
+            try:
+                progress()
+                reports()
+            finally:
+                connection.close()
+        return run
+
     def _save_evaluation(self, directory, result, gt, evaluation):
         directory.mkdir(parents=True, exist_ok=False)
         write_json(directory / 'points.json', {'coordinate_order': 'xy', 'points': [
@@ -533,17 +802,34 @@ def argument_parser():
                         help='Segmentation methods (default: all six)')
     parser.add_argument('--output', type=Path,
                         help='New output directory (default: outputs/affordance_benchmark_<timestamp>)')
+    parser.add_argument('--streaming', action='store_true', help='Persist all labels/scores in SQLite; export selected examples')
+    parser.add_argument('--config', type=Path, help='JSON method -> nested parameter overrides (streaming mode)')
+    parser.add_argument('--resume', action='store_true', help='Resume the streaming run at --output')
+    parser.add_argument('--export-limit', type=int, default=12, help='Number of visual examples in streaming mode')
+    parser.add_argument('--checkpoint-interval', type=int, default=100, help='Refresh CSV/HTML every N jobs; SQLite commits every job')
     return parser
 
 
 if __name__ == '__main__':
+    def terminate(signum, frame):
+        raise KeyboardInterrupt(f'Received signal {signum}')
+
+    signal.signal(signal.SIGTERM, terminate)
     parser = argument_parser()
     args = parser.parse_args()
     if args.split is not None and args.manifest is None:
         parser.error('--split requires --manifest; --image/--debug are development runs')
+    if args.resume and args.output is None:
+        parser.error('--resume requires --output for an existing streaming run')
     benchmark = AffordanceBenchmark.create('umd')
     manifest = args.manifest if args.manifest is not None else benchmark.development_manifest(args.image)
     output = args.output or OUTPUT_DIR / f"affordance_benchmark_{datetime.now():%Y%m%d_%H%M%S_%f}"
-    report = benchmark.run(manifest, output, methods=args.method, split=args.split)
+    if args.streaming or args.config is not None or args.resume:
+        configs = json.loads(args.config.read_text()) if args.config is not None else None
+        report = benchmark.run_streaming(load_manifest(manifest, args.split), output,
+            methods=args.method, configs=configs, resume=args.resume,
+            export_limit=args.export_limit, checkpoint_interval=args.checkpoint_interval)
+    else:
+        report = benchmark.run(manifest, output, methods=args.method, split=args.split)
     print(f"{report['status']}: {output.resolve() / 'index.html'}", flush=True)
     sys.exit(0 if report['completed'] else 1)

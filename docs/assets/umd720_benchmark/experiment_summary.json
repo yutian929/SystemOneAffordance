@@ -1,0 +1,482 @@
+{
+  "stop": {
+    "status": "stopped_by_user",
+    "stopped_at": "2026-10-19T07:12:34.852965+00:00",
+    "requested_rounds": 10,
+    "completed_rounds": 5,
+    "incomplete_round": 6,
+    "selected_method": "mosa",
+    "selected_config_round": 5,
+    "reason": "User ended tuning and selected MoSA; no further benchmark or repair runs authorized.",
+    "final_report": "docs/07_umd720_benchmark_report.md"
+  },
+  "manifest_sha256": "4bbc292f9148b4b88150ea9648f449a3e792d4c3c0ad31ba2679188b2939558d",
+  "sample_counts": {
+    "tools": 630,
+    "clutter": 90
+  },
+  "completed_rounds": [
+    {
+      "round": 1,
+      "started_at": "2026-10-18T13:26:29.750284+00:00",
+      "finished_at": "2026-10-18T15:40:15.728476+00:00",
+      "audit": {
+        "status": "passed",
+        "jobs": 4320,
+        "all_score_rows": 10590,
+        "recomputed_label_maps": 95,
+        "recomputed_affordance_rows": 276
+      }
+    },
+    {
+      "round": 2,
+      "started_at": "2026-10-18T15:40:26.406481+00:00",
+      "finished_at": "2026-10-18T18:20:24.104579+00:00",
+      "audit": {
+        "status": "passed",
+        "jobs": 4320,
+        "all_score_rows": 10590,
+        "recomputed_label_maps": 96,
+        "recomputed_affordance_rows": 276
+      }
+    },
+    {
+      "round": 3,
+      "started_at": "2026-10-18T18:20:43.163014+00:00",
+      "finished_at": "2026-10-18T20:50:13.651889+00:00",
+      "audit": {
+        "status": "passed",
+        "jobs": 4320,
+        "all_score_rows": 10590,
+        "recomputed_label_maps": 96,
+        "recomputed_affordance_rows": 276
+      }
+    },
+    {
+      "round": 4,
+      "started_at": "2026-10-18T20:50:27.521873+00:00",
+      "finished_at": "2026-10-18T23:32:36.428706+00:00",
+      "audit": {
+        "status": "passed",
+        "jobs": 4320,
+        "all_score_rows": 10590,
+        "recomputed_label_maps": 96,
+        "recomputed_affordance_rows": 278
+      }
+    },
+    {
+      "round": 5,
+      "started_at": "2026-10-18T23:33:12.767057+00:00",
+      "finished_at": "2026-10-19T01:59:48.676295+00:00",
+      "audit": {
+        "status": "passed",
+        "jobs": 4320,
+        "all_score_rows": 10590,
+        "recomputed_label_maps": 96,
+        "recomputed_affordance_rows": 278
+      }
+    }
+  ],
+  "selected_mosa": {
+    "round": 5,
+    "config": {
+      "method": "mosa",
+      "runtime": {
+        "device": "cuda:1",
+        "seed": 0,
+        "precision": "float32"
+      },
+      "postprocess": {
+        "min_mask_area": 16
+      },
+      "model": {
+        "model_type": "whole_image_R50",
+        "checkpoint_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/whole-image",
+        "checkpoint_name": "whole_image_segmentation.pth",
+        "code_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/source",
+        "detectron_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/detectron2",
+        "model_config": "Adaption_to_Segment_Anything/whole_image_segmentation/configs/maskformer2_R50_bs16_8ep.yaml"
+      },
+      "preprocess": {
+        "short_edge": 1024,
+        "max_size": 2048
+      },
+      "generator": {
+        "num_queries": 2000,
+        "num_classes": 1,
+        "mask_batch_size": 16,
+        "max_masks": 250,
+        "score_thresh": 0.25,
+        "mask_nms_thresh": 0.95
+      }
+    },
+    "quality": 0.8608648252073599,
+    "success": 0.828698741993456,
+    "regions": 126.64285714285714,
+    "seconds": 0.6524772111043964,
+    "summaries": {
+      "clutter": {
+        "subset": "clutter",
+        "method": "mosa",
+        "status": "complete",
+        "expected_images": 90,
+        "completed_images": 90,
+        "failed_images": 0,
+        "failure_rate": 0.0,
+        "class_count": 7,
+        "mean_oracle_iou": 0.8576447764012329,
+        "success_rate_080": 0.8142857142857143,
+        "mean_point_hit_rate": 0.8338912366293318,
+        "mean_region_count": 143.61111111111111,
+        "mean_wall_seconds": 0.6657767858547029
+      },
+      "tools": {
+        "subset": "tools",
+        "method": "mosa",
+        "status": "complete",
+        "expected_images": 630,
+        "completed_images": 630,
+        "failed_images": 0,
+        "failure_rate": 0.0,
+        "class_count": 7,
+        "mean_oracle_iou": 0.8640848740134869,
+        "success_rate_080": 0.8431117697011977,
+        "mean_point_hit_rate": 0.9294285123833014,
+        "mean_region_count": 109.67460317460318,
+        "mean_wall_seconds": 0.6391776363540899
+      }
+    },
+    "worst_samples": {
+      "tools": [
+        {
+          "sample_id": "tools_scissors_01_00000202",
+          "mean_oracle_iou": 0.5075333965982919
+        },
+        {
+          "sample_id": "tools_mallet_01_00000190",
+          "mean_oracle_iou": 0.5987055068217031
+        },
+        {
+          "sample_id": "tools_scissors_03_00000145",
+          "mean_oracle_iou": 0.6253667005780595
+        },
+        {
+          "sample_id": "tools_mug_06_00000184",
+          "mean_oracle_iou": 0.6386237884984087
+        },
+        {
+          "sample_id": "tools_mug_09_00000025",
+          "mean_oracle_iou": 0.6435604322469547
+        }
+      ],
+      "clutter": [
+        {
+          "sample_id": "clutter_scene_02_00000292",
+          "mean_oracle_iou": 0.7992094835551279
+        },
+        {
+          "sample_id": "clutter_scene_02_00000142",
+          "mean_oracle_iou": 0.8056098575603569
+        },
+        {
+          "sample_id": "clutter_scene_02_00000253",
+          "mean_oracle_iou": 0.8112447633580082
+        },
+        {
+          "sample_id": "clutter_scene_02_00000241",
+          "mean_oracle_iou": 0.8152185642669458
+        },
+        {
+          "sample_id": "clutter_scene_03_00000036",
+          "mean_oracle_iou": 0.8169933297561593
+        }
+      ]
+    },
+    "worst_classes": {
+      "tools": [
+        {
+          "subset": "tools",
+          "method": "mosa",
+          "affordance_id": 1,
+          "affordance": "grasp",
+          "status": "complete",
+          "image_count": 493,
+          "sequence_count": 87,
+          "oracle_iou": 0.7620570320150359,
+          "success_080": 0.4681992337164751,
+          "point_hit_rate": 0.8834496442255065
+        },
+        {
+          "subset": "tools",
+          "method": "mosa",
+          "affordance_id": 2,
+          "affordance": "cut",
+          "status": "complete",
+          "image_count": 150,
+          "sequence_count": 25,
+          "oracle_iou": 0.8513649598016703,
+          "success_080": 0.7599999999999999,
+          "point_hit_rate": 0.9576190476190476
+        },
+        {
+          "subset": "tools",
+          "method": "mosa",
+          "affordance_id": 5,
+          "affordance": "pound",
+          "status": "complete",
+          "image_count": 60,
+          "sequence_count": 10,
+          "oracle_iou": 0.8520885709159358,
+          "success_080": 0.9166666666666666,
+          "point_hit_rate": 0.9222222222222222
+        }
+      ],
+      "clutter": [
+        {
+          "subset": "clutter",
+          "method": "mosa",
+          "affordance_id": 1,
+          "affordance": "grasp",
+          "status": "complete",
+          "image_count": 90,
+          "sequence_count": 3,
+          "oracle_iou": 0.8083837645388597,
+          "success_080": 0.6222222222222222,
+          "point_hit_rate": 0.7043514510181178
+        },
+        {
+          "subset": "clutter",
+          "method": "mosa",
+          "affordance_id": 7,
+          "affordance": "wrap-grasp",
+          "status": "complete",
+          "image_count": 90,
+          "sequence_count": 3,
+          "oracle_iou": 0.8214671537062177,
+          "success_080": 0.6777777777777777,
+          "point_hit_rate": 0.7711127144460478
+        },
+        {
+          "subset": "clutter",
+          "method": "mosa",
+          "affordance_id": 2,
+          "affordance": "cut",
+          "status": "complete",
+          "image_count": 60,
+          "sequence_count": 2,
+          "oracle_iou": 0.8279961310277875,
+          "success_080": 0.6666666666666667,
+          "point_hit_rate": 0.8194444444444444
+        }
+      ]
+    }
+  },
+  "quality_best_mosa": {
+    "round": 2,
+    "config": {
+      "method": "mosa",
+      "runtime": {
+        "device": "cuda:1",
+        "seed": 0,
+        "precision": "float32"
+      },
+      "postprocess": {
+        "min_mask_area": 16
+      },
+      "model": {
+        "model_type": "whole_image_R50",
+        "checkpoint_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/whole-image",
+        "checkpoint_name": "whole_image_segmentation.pth",
+        "code_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/source",
+        "detectron_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/detectron2",
+        "model_config": "Adaption_to_Segment_Anything/whole_image_segmentation/configs/maskformer2_R50_bs16_8ep.yaml"
+      },
+      "preprocess": {
+        "short_edge": 1024,
+        "max_size": 2048
+      },
+      "generator": {
+        "num_queries": 2000,
+        "num_classes": 1,
+        "mask_batch_size": 16,
+        "max_masks": 500,
+        "score_thresh": 0.25,
+        "mask_nms_thresh": 0.95
+      }
+    },
+    "quality": 0.8625532172110809,
+    "success": 0.8370482972659793,
+    "regions": 148.94920634920635,
+    "seconds": 0.8975251133081323,
+    "summaries": {
+      "clutter": {
+        "subset": "clutter",
+        "method": "mosa",
+        "status": "complete",
+        "expected_images": 90,
+        "completed_images": 90,
+        "failed_images": 0,
+        "failure_rate": 0.0,
+        "class_count": 7,
+        "mean_oracle_iou": 0.8596090480827927,
+        "success_rate_080": 0.8309523809523809,
+        "mean_point_hit_rate": 0.8371584323965277,
+        "mean_region_count": 171.57777777777778,
+        "mean_wall_seconds": 0.9192620705559319
+      },
+      "tools": {
+        "subset": "tools",
+        "method": "mosa",
+        "status": "complete",
+        "expected_images": 630,
+        "completed_images": 630,
+        "failed_images": 0,
+        "failure_rate": 0.0,
+        "class_count": 7,
+        "mean_oracle_iou": 0.8654973863393691,
+        "success_rate_080": 0.8431442135795777,
+        "mean_point_hit_rate": 0.9302062747044821,
+        "mean_region_count": 126.32063492063493,
+        "mean_wall_seconds": 0.8757881560603329
+      }
+    },
+    "worst_samples": {
+      "tools": [
+        {
+          "sample_id": "tools_scissors_01_00000202",
+          "mean_oracle_iou": 0.520170521025161
+        },
+        {
+          "sample_id": "tools_mallet_01_00000190",
+          "mean_oracle_iou": 0.5999799333297745
+        },
+        {
+          "sample_id": "tools_scissors_03_00000145",
+          "mean_oracle_iou": 0.6211621134175896
+        },
+        {
+          "sample_id": "tools_mug_06_00000184",
+          "mean_oracle_iou": 0.6400928558384527
+        },
+        {
+          "sample_id": "tools_mug_09_00000025",
+          "mean_oracle_iou": 0.643342434036847
+        }
+      ],
+      "clutter": [
+        {
+          "sample_id": "clutter_scene_02_00000292",
+          "mean_oracle_iou": 0.8011036339433816
+        },
+        {
+          "sample_id": "clutter_scene_02_00000253",
+          "mean_oracle_iou": 0.8156620400642008
+        },
+        {
+          "sample_id": "clutter_scene_02_00000142",
+          "mean_oracle_iou": 0.8157374239008003
+        },
+        {
+          "sample_id": "clutter_scene_03_00000126",
+          "mean_oracle_iou": 0.8173835889534508
+        },
+        {
+          "sample_id": "clutter_scene_03_00000069",
+          "mean_oracle_iou": 0.8177811204083577
+        }
+      ]
+    },
+    "worst_classes": {
+      "tools": [
+        {
+          "subset": "tools",
+          "method": "mosa",
+          "affordance_id": 1,
+          "affordance": "grasp",
+          "status": "complete",
+          "image_count": 493,
+          "sequence_count": 87,
+          "oracle_iou": 0.7652400323454621,
+          "success_080": 0.4816091954022989,
+          "point_hit_rate": 0.8823002189381502
+        },
+        {
+          "subset": "tools",
+          "method": "mosa",
+          "affordance_id": 2,
+          "affordance": "cut",
+          "status": "complete",
+          "image_count": 150,
+          "sequence_count": 25,
+          "oracle_iou": 0.8509392551660969,
+          "success_080": 0.7733333333333333,
+          "point_hit_rate": 0.9576190476190476
+        },
+        {
+          "subset": "tools",
+          "method": "mosa",
+          "affordance_id": 5,
+          "affordance": "pound",
+          "status": "complete",
+          "image_count": 60,
+          "sequence_count": 10,
+          "oracle_iou": 0.8514410233340562,
+          "success_080": 0.8666666666666666,
+          "point_hit_rate": 0.9222222222222222
+        }
+      ],
+      "clutter": [
+        {
+          "subset": "clutter",
+          "method": "mosa",
+          "affordance_id": 1,
+          "affordance": "grasp",
+          "status": "complete",
+          "image_count": 90,
+          "sequence_count": 3,
+          "oracle_iou": 0.8108744843665034,
+          "success_080": 0.6777777777777777,
+          "point_hit_rate": 0.7153831970498638
+        },
+        {
+          "subset": "clutter",
+          "method": "mosa",
+          "affordance_id": 7,
+          "affordance": "wrap-grasp",
+          "status": "complete",
+          "image_count": 90,
+          "sequence_count": 3,
+          "oracle_iou": 0.8241653593741294,
+          "success_080": 0.7222222222222222,
+          "point_hit_rate": 0.77322911656245
+        },
+        {
+          "subset": "clutter",
+          "method": "mosa",
+          "affordance_id": 2,
+          "affordance": "cut",
+          "status": "complete",
+          "image_count": 60,
+          "sequence_count": 2,
+          "oracle_iou": 0.8301879404702105,
+          "success_080": 0.6833333333333333,
+          "point_hit_rate": 0.8250000000000001
+        }
+      ]
+    }
+  },
+  "initial_provenance": {
+    "python": "/home/hri/miniconda3/envs/systemone-affordance/bin/python",
+    "platform": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+    "packages": {
+      "numpy": "2.2.6",
+      "scipy": "1.15.3",
+      "scikit-image": "0.25.2",
+      "Pillow": "12.1.1"
+    },
+    "git_commit": "4d0bc7d78e135fff42b6df0083379c611267a539",
+    "git_status": "M affordance_benchmark.py\n?? tests/test_full_benchmark.py",
+    "script_sha256": "3937a2751b353fb6d2e79654c7a9333824d651dcd5bb2b3d966c4d5fc9614528",
+    "gpus": "0, NVIDIA GeForce RTX 4090 D, 570.133.07, 49140 MiB\n1, NVIDIA GeForce RTX 4090 D, 570.133.07, 49140 MiB"
+  }
+}

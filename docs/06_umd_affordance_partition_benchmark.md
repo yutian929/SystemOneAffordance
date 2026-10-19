@@ -1,6 +1,6 @@
 # UMD：面向 2D Affordance 的分割评价方案
 
-评测已实现在根目录 [affordance_benchmark.py](../affordance_benchmark.py)，包含抽象基类 `AffordanceBenchmark`、UMD 实现 `UMDBenchmark`、指标计算、CSV 导出和可视化。默认运行五张 debug 图及全部六种方法；正式人工标注帧清单仍需核实和提供，默认结果属于开发评测。
+评测已实现在根目录 [affordance_benchmark.py](../affordance_benchmark.py)，包含抽象基类 `AffordanceBenchmark`、UMD 实现 `UMDBenchmark`、指标计算、CSV 导出和可视化。无参数时运行五张 debug 图及全部六种方法。已从本地 MAT 的 `gt_type` 核实人工标注，并固定抽取 720 张，完成五轮完整参数比较后按用户要求停止，最终采用 MoSA，见 [07：实验报告](07_umd720_benchmark_report.md)。这些样本属于调参开发集，不能当作独立测试成绩。
 
 ## 1. 我们到底要比较什么？
 
@@ -56,7 +56,7 @@ SAM2 / UnSAMv2+ / Semantic-SAM / PartGLEE / MoSA / SLIC
 
 ### 3.2 用一个 JSON 文件固定评测图片
 
-自定义清单可以保存为 `benchmarks/umd/manifest.json`，每条记录是一张图片；仓库没有预置正式测试清单。下面是格式示例；这张现有 debug 图的人工标注身份尚未核实，所以写成 `unknown`，不能直接列入正式测试。
+自定义清单可以保存为 `benchmarks/umd/manifest.json`，每条记录是一张图片；仓库没有预置独立测试清单。下面是格式示例；这张 debug 图的 MAT 中 `gt_type="automatic"`，因此不能列入人工标注实验。
 
 ```json
 {
@@ -67,7 +67,7 @@ SAM2 / UnSAMv2+ / Semantic-SAM / PartGLEE / MoSA / SLIC
       "subset": "tools",
       "sequence_id": "knife_01",
       "split": "dev",
-      "annotation_status": "unknown",
+      "annotation_status": "automatic",
       "rgb": "data/umd/tools/knife_01/knife_01_00000122_rgb.jpg",
       "label": "data/umd/tools/knife_01/knife_01_00000122_label.mat"
     }
@@ -77,7 +77,7 @@ SAM2 / UnSAMv2+ / Semantic-SAM / PartGLEE / MoSA / SLIC
 
 路径相对仓库根目录；`subset` 是 `tools` 或 `clutter`；`sequence_id` 是工具实例或场景；`split` 是开发用的 `dev` 或正式测试用的 `test`；`annotation_status` 是 `manual`、`automatic` 或 `unknown`。
 
-正式测试要求 `split="test"`、`annotation_status="manual"`，并在样本中或 JSON 顶层提供非空字符串 `annotation_evidence`，说明核实人工标注身份的依据。程序校验并保存这些字段，不自动验证依据的真实性，也不猜测人工帧号。图片清单和每种方法的配置在运行前固定，所有方法使用同一批图片。
+正式测试要求 `split="test"`、`annotation_status="manual"`，并在样本中或 JSON 顶层提供非空字符串 `annotation_evidence`，说明核实人工标注身份的依据。流式模式还会读取每个标记为人工的 MAT，检查 `gt_type` 确实等于 `manual`；普通模式仅记录清单提供的依据。不能只根据帧号对 3 取余猜测人工帧。图片清单和每种方法的配置在每轮运行前固定，所有方法使用同一批图片。
 
 ## 4. 分割结果是什么？
 
@@ -230,7 +230,8 @@ example_001,tools,example_tool,mosa,1,grasp,0.88,1,3,2,0.666667,100,88,0,12,3
 | 开发集 | 先用现有 5 张 debug 图检查流程，结果只用于调试 |
 | Tools 正式集 | 参考官方 `category_split.txt` 的测试实例，从已核实人工标注的帧中按实例均匀抽样，第一轮约 200～500 张；反复调参用过的实例不作为独立测试证据，排除项需记录 |
 | Clutter 正式集 | 三个场景分别从已核实人工标注的帧中均匀抽样，每场景最多 20 张；用过的 debug 帧单独标记，不计正式分数 |
-| 人工标注帧 | 官方说明每三帧中一帧是人工标注，但具体帧号规则仍需核实；核实前可以做流程测试，不发布正式成绩 |
+| 人工标注帧 | 逐个读取 MAT 的 `gt_type`，只接受 `manual`；本地共 9,922 张，Tools 9,632、Clutter 290 |
+| 本次 720 张调参集 | Tools 的 105 个实例各 6 张，Clutter 的 3 个场景各 30 张；每组从人工帧中均匀抽取，固定清单，所有轮次一致；标记 `dev` |
 | 背景 0 | 参与评价；把背景误选进功能区域会扣 IoU |
 | 标签 -1 | 本项目第一版约定为忽略像素，所有质量指标都排除它，并记录比例；官方含义尚未明确，不把它解释成背景 |
 | 图中不存在的功能 | 不计该图该类的 Oracle IoU、达标比例和点命中率，避免“空对空”抬高成绩 |
@@ -289,6 +290,44 @@ run = benchmark.run(manifest, "outputs/my_umd_benchmark")  # 全部方法
 evaluation = benchmark.evaluate(labels, gt)
 ```
 
-本版完整运行每次重新分割，不自动复用旧目录；输出目录不能覆盖。个别任务失败时会记录异常并继续其他方法，`run.json` 标记为 `incomplete`，命令退出码为 1；未完成的方法/子集不计算汇总质量与成本，保留成功的逐图明细。Ctrl+C 会保存已有分数和页面，并标记为 `interrupted`。
+普通模式每次重新分割，不自动复用旧目录；输出目录不能覆盖。个别任务失败时会记录异常并继续其他方法，`run.json` 标记为 `incomplete`，命令退出码为 1；未完成的方法/子集不计算汇总质量与成本，保留成功的逐图明细。Ctrl+C 会保存已有分数和页面，并标记为 `interrupted`。
 
-后续扩展是核实并固定正式测试清单，以及在开发集上选择粗、中、细几组参数，画“区域数 K—IoU”曲线。这两项不影响当前 debug 评测入口使用。
+## 9. 720 张人工标注怎样连续调参？
+
+本次实验目录为 [umd_full_tuning_20261018_211215_853312](../outputs/umd_full_tuning_20261018_211215_853312/)。目录名沿用最初全量审计时的名字，**实际调参清单固定为 720 张人工标注**。数量与身份核对见 [审计文件](../outputs/umd_full_tuning_20261018_211215_853312/sample720_audit.json)，逐轮分析和采用参数见 [最终报告](07_umd720_benchmark_report.md)。实验已停止，没有等待执行的后续轮次。
+
+先按实例/场景分组，每组只保留 `gt_type="manual"`，按样本名排序。Tools 每组取 6 张，Clutter 每组取 30 张，索引为 `floor((i+0.5)*N/k)`。这是等间隔选取不同视角，不是每轮重新随机抽样。清单内存有 RGB 内容和 GT 文件的 SHA-256；720 张没有重复 RGB，覆盖全部七种功能。
+
+大批量运行启用流式存储：所有样本的最终标签、完整评分和最优组合区域 ID 都保存在 `results.sqlite`；只给固定数量的示例导出原始候选和完整图片，避免生成过多文件。SQLite 每张图提交一次，`--checkpoint-interval` 控制 CSV/HTML 刷新间隔。
+
+```bash
+# 此处只需 manifest，输出仍会自动按时间命名；默认全部六种方法
+python affordance_benchmark.py --streaming \
+  --manifest outputs/umd_full_tuning_20261018_211215_853312/manifest_sample720_umd.json \
+  --export-limit 24
+
+# 配置文件的顶层是方法名，可以只写需要改动的参数
+# 例如 {"slic": {"algorithm": {"n_segments": 100}}}
+python affordance_benchmark.py --manifest path/to/manifest.json --config path/to/config.json
+
+# 仅恢复时需要指定原有目录，并保持原清单、配置、方法、示例数量一致
+python affordance_benchmark.py --manifest path/to/manifest.json --config path/to/config.json \
+  --resume --output outputs/existing_run --export-limit 24
+```
+
+恢复时会核对输入哈希、配置、方法、示例选择、实现文件哈希及环境，只重试失败或缺失任务。不同进程不能同时写同一个输出目录。SQLite 中每行标签按 `<u4` 小端无符号 32 位整数保存，再用 zlib 无损压缩；`shape_json` 保存 `[H,W]`，解压后可以重新评价。
+
+原计划至少 10 轮：第 1 轮默认值；第 2～7 轮各方法依次探索三个关键参数；第 8～9 轮探索小区域合并面积；第 10 轮复跑每种方法此前最好的完整配置。**实际完成五轮，第 6 轮未完整完成，随后用户选择 MoSA 并停止实验；第 7～10 轮未执行。** 每次只改变一个参数，起点使用此前实测最好的配置；上一轮效果决定下一次探测方向。
+
+| 方法 | 首先探索的参数 |
+|---|---|
+| SAM2 | 候选预测 IoU 阈值、稳定性阈值、点网格密度 |
+| UnSAMv2+ | granularity、预测 IoU 阈值、稳定性阈值 |
+| Semantic-SAM | 预测 IoU 阈值、分割层级、点网格密度 |
+| PartGLEE | score 阈值、NMS 阈值、部件候选上限 |
+| MoSA | score 阈值、候选上限、NMS 阈值 |
+| SLIC | 目标区域数、compactness、平滑强度 |
+
+每轮必须完成全部 `720×6=4,320` 个任务，并通过汇总重建和保存标签抽查，才能参与下一轮配置选择。逐轮选择理由会写入 JSON，报告同时给出质量最佳配置，以及质量接近但区域更少的配置。Tools、Clutter 分开报告，搜索时二者 IoU 等权平均；不能只看 IoU 不看区域数和耗时。
+
+这 720 张反复用于选参数，结果只说明在当前调参集上的表现。要报告泛化成绩，还需要额外保留没有参与参数选择的实例/场景作为独立测试集。
