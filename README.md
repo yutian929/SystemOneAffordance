@@ -2,7 +2,11 @@
 
 当前实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）** 及其 **UMD Affordance 分区评测**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+、Semantic-SAM、PartGLEE RN50、MoSA R50 和 SLIC，统一通过 `DensePartition` 接口调用。评测器使用 UMD 标签评价这些区域的表达能力，尚未接入任务决策模型。
 
-最终采用 **MoSA whole-image R50**，Python API 默认使用第 5 轮选定的配置：`max_masks=250`、`score_thresh=0.25`、`mask_nms_thresh=0.95`。720 张人工标注的调参已停止，共完成五轮完整比较；结果与选择理由见 [07：UMD 720 张评测报告](docs/07_umd720_benchmark_report.md)。命令行比较入口不指定 `--method` 时仍运行全部六种方法；只运行最终方案可用 `python dense_partition.py --method mosa`。
+最终采用 **MoSA whole-image R50**，Python API 默认使用第 5 轮选定的配置：`max_masks=250`、`score_thresh=0.25`、`mask_nms_thresh=0.95`。六方法选型阶段共完成五轮完整比较；结果与选择理由见 [07：UMD 720 张评测报告](docs/07_umd720_benchmark_report.md)。命令行比较入口不指定 `--method` 时仍运行全部六种方法；只运行最终方案可用 `python dense_partition.py --method mosa`。
+
+后续 [08：MoSA 专项调参](docs/08_mosa_parameter_tuning.md) 推荐使用 `250 / 0.40 / 0.95` 和最小面积 `36`：同一份 720 张开发清单上 Oracle IoU 为 **0.85835**，K 为 **101.73**，比上述默认减少 **19.7%** 的区域。三档参数以独立 JSON 提供，未覆盖 `config.py`；使用方式和质量取舍见报告。
+
+继续降低区域数的结果见 [09：MoSA 低 K 调参](docs/09_mosa_low_k_tuning.md)：`150 / 0.85 / 0.95`、最小面积 `52` 达到 Oracle IoU **0.85147**、平均 K **59.81**；另提供 K≈65 和 K≈50 的配置。[采用 K≈60 配置](docs/assets/mosa_low_k_20261019/k60_config.json)可比上一轮 K=75.49 的低 K 备选再减少 **20.8%** 的区域，IoU 下降约 **0.24 个百分点**。这些都是同一开发清单上的调参结果。
 
 ## 代码结构
 

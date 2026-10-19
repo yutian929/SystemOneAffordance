@@ -1,0 +1,253 @@
+{
+  "selected": {
+    "name": "full_balanced_a36",
+    "Q": 0.8583547272532636,
+    "K": 101.72539682539684,
+    "success": 0.8176558535737204,
+    "hit": 0.8800899924027727,
+    "tools_iou": 0.8619192912427386,
+    "clutter_iou": 0.8547901632637885,
+    "max_masks": 250,
+    "score_thresh": 0.4,
+    "mask_nms_thresh": 0.95,
+    "min_mask_area": 36,
+    "evaluation": "label_replay"
+  },
+  "quality": {
+    "name": "quality",
+    "Q": 0.8632864116569736,
+    "K": 165.2293650793651,
+    "success": 0.837107105071379,
+    "hit": 0.8833344038327342,
+    "tools_iou": 0.8665034629124305,
+    "clutter_iou": 0.8600693604015167,
+    "max_masks": 500,
+    "score_thresh": 0.15,
+    "mask_nms_thresh": 0.95,
+    "min_mask_area": 16,
+    "evaluation": "full_inference"
+  },
+  "comparison": [
+    {
+      "name": "previous_default",
+      "Q": 0.8608648252073599,
+      "K": 126.64285714285714,
+      "success": 0.828698741993456,
+      "hit": 0.8816598745063167,
+      "tools_iou": 0.8640848740134869,
+      "clutter_iou": 0.8576447764012329,
+      "max_masks": 250,
+      "score_thresh": 0.25,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 16,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "previous_quality",
+      "Q": 0.8625532172110809,
+      "K": 148.94920634920635,
+      "success": 0.8370482972659793,
+      "hit": 0.883682353550505,
+      "tools_iou": 0.8654973863393691,
+      "clutter_iou": 0.8596090480827927,
+      "max_masks": 500,
+      "score_thresh": 0.25,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 16,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "area32",
+      "Q": 0.8587734778524887,
+      "K": 105.70873015873015,
+      "success": 0.8195606154784822,
+      "hit": 0.8802713005582189,
+      "tools_iou": 0.8621992740143497,
+      "clutter_iou": 0.8553476816906276,
+      "max_masks": 250,
+      "score_thresh": 0.25,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 32,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "score45_area40",
+      "Q": 0.8579272655108439,
+      "K": 100.51111111111109,
+      "success": 0.8204774189814926,
+      "hit": 0.8803864711475273,
+      "tools_iou": 0.8614731881144209,
+      "clutter_iou": 0.8543813429072669,
+      "max_masks": 500,
+      "score_thresh": 0.45,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 40,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "balanced",
+      "Q": 0.8588227962599394,
+      "K": 104.71666666666667,
+      "success": 0.8200368059546728,
+      "hit": 0.8800728878598061,
+      "tools_iou": 0.8621942845817359,
+      "clutter_iou": 0.855451307938143,
+      "max_masks": 250,
+      "score_thresh": 0.4,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 32,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "quality",
+      "Q": 0.8632864116569736,
+      "K": 165.2293650793651,
+      "success": 0.837107105071379,
+      "hit": 0.8833344038327342,
+      "tools_iou": 0.8665034629124305,
+      "clutter_iou": 0.8600693604015167,
+      "max_masks": 500,
+      "score_thresh": 0.15,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 16,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "compact",
+      "Q": 0.8538968280027,
+      "K": 75.48809523809524,
+      "success": 0.7952066501553843,
+      "hit": 0.8767671206629694,
+      "tools_iou": 0.8556566173162803,
+      "clutter_iou": 0.8521370386891197,
+      "max_masks": 250,
+      "score_thresh": 0.65,
+      "mask_nms_thresh": 0.75,
+      "min_mask_area": 48,
+      "evaluation": "full_inference"
+    },
+    {
+      "name": "full_balanced_a36",
+      "Q": 0.8583547272532636,
+      "K": 101.72539682539684,
+      "success": 0.8176558535737204,
+      "hit": 0.8800899924027727,
+      "tools_iou": 0.8619192912427386,
+      "clutter_iou": 0.8547901632637885,
+      "max_masks": 250,
+      "score_thresh": 0.4,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 36,
+      "evaluation": "label_replay"
+    }
+  ],
+  "quality_tolerance": 0.005,
+  "success_tolerance": 0.02,
+  "area_configurations": 56,
+  "screen_configurations": 292,
+  "screen_samples": 240,
+  "fresh_full_configurations": 5,
+  "full_samples": 720,
+  "manifest_sha256": "4bbc292f9148b4b88150ea9648f449a3e792d4c3c0ad31ba2679188b2939558d",
+  "source_runs": {
+    "previous_default": "outputs/umd_full_tuning_20261018_211215_853312/round_05",
+    "previous_quality": "outputs/umd_full_tuning_20261018_211215_853312/round_02",
+    "area32": "outputs/mosa_tuning_20261019/full_area32",
+    "score45_area40": "outputs/mosa_tuning_20261019/full_score45_area40",
+    "balanced": "outputs/mosa_tuning_20261019/full_balanced",
+    "quality": "outputs/mosa_tuning_20261019/full_quality",
+    "compact": "outputs/mosa_tuning_20261019/full_compact"
+  },
+  "screen_audit": [
+    {
+      "max_masks": 250,
+      "samples": 240,
+      "all_metrics_equal": true
+    },
+    {
+      "max_masks": 500,
+      "samples": 240,
+      "all_metrics_equal": true
+    }
+  ],
+  "final_area_audit": {
+    "success": true,
+    "samples": [
+      "clutter_scene_01_00000171",
+      "clutter_scene_02_00000193",
+      "clutter_scene_03_00000087",
+      "tools_bowl_03_00000145",
+      "tools_bowl_08_00000172",
+      "tools_cup_03_00000139",
+      "tools_hammer_02_00000151",
+      "tools_knife_03_00000121",
+      "tools_knife_08_00000193",
+      "tools_ladle_01_00000205",
+      "tools_mallet_01_00000190",
+      "tools_mug_02_00000154",
+      "tools_mug_03_00000211",
+      "tools_mug_06_00000184",
+      "tools_mug_07_00000151",
+      "tools_mug_09_00000025",
+      "tools_mug_12_00000151",
+      "tools_mug_17_00000154",
+      "tools_pot_02_00000148",
+      "tools_scissors_01_00000202",
+      "tools_scissors_01_00000247",
+      "tools_scissors_02_00000148",
+      "tools_scissors_03_00000145",
+      "tools_scissors_07_00000127",
+      "tools_shears_02_00000193",
+      "tools_spoon_03_00000184",
+      "tools_spoon_08_00000154",
+      "tools_spoon_10_00000026",
+      "tools_trowel_01_00000184",
+      "tools_turner_01_00000130",
+      "tools_turner_06_00000154"
+    ],
+    "areas": [
+      32,
+      34,
+      36,
+      38,
+      40,
+      44,
+      48,
+      64
+    ],
+    "comparisons": 248,
+    "all_labels_equal": true,
+    "config": {
+      "method": "mosa",
+      "runtime": {
+        "device": "cuda:1",
+        "seed": 0,
+        "precision": "float32"
+      },
+      "postprocess": {
+        "min_mask_area": 0
+      },
+      "model": {
+        "model_type": "whole_image_R50",
+        "checkpoint_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/whole-image",
+        "checkpoint_name": "whole_image_segmentation.pth",
+        "code_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/source",
+        "detectron_dir": "/data0/yutian/SystemOneAffordance/models/MoSA/detectron2",
+        "model_config": "Adaption_to_Segment_Anything/whole_image_segmentation/configs/maskformer2_R50_bs16_8ep.yaml"
+      },
+      "preprocess": {
+        "short_edge": 1024,
+        "max_size": 2048
+      },
+      "generator": {
+        "num_queries": 2000,
+        "num_classes": 1,
+        "mask_batch_size": 16,
+        "max_masks": 250,
+        "score_thresh": 0.4,
+        "mask_nms_thresh": 0.95
+      }
+    }
+  },
+  "note": "Oracle IoU on repeatedly tuned development images. No held-out test. Timing comparisons omitted: full runs overlapped on the two GPUs."
+}

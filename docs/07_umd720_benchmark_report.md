@@ -1,5 +1,7 @@
 # UMD 720 张人工标注分割评测：采用 MoSA
 
+后续针对 MoSA 的参数搜索见 [08：MoSA 专项调参](08_mosa_parameter_tuning.md)。本报告保留六方法选型阶段的结果与当时决定。
+
 实验日期：2026-10-18 至 2026-10-19。**最终选择 MoSA whole-image R50，停止继续调参。实际完成并验收 5 轮，第 6 轮未完整完成；原计划的 10 轮没有跑满。**
 
 推荐采用第 5 轮的 MoSA 配置：`max_masks=250`、`score_thresh=0.25`、`mask_nms_thresh=0.95`、`min_mask_area=16`。平均 Oracle IoU 为 **0.8609**，平均区域数 **126.6**，分割耗时约 **0.65 秒/图**。

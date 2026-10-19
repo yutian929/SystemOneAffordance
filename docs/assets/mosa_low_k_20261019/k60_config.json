@@ -1,0 +1,12 @@
+{
+  "mosa": {
+    "generator": {
+      "max_masks": 150,
+      "score_thresh": 0.85,
+      "mask_nms_thresh": 0.95
+    },
+    "postprocess": {
+      "min_mask_area": 52
+    }
+  }
+}
