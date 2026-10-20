@@ -1,0 +1,111 @@
+{
+  "comparison": [
+    {
+      "name": "max_masks150_k60",
+      "max_masks": 150,
+      "score_thresh": 0.85,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 52,
+      "Q": 0.851470734111038,
+      "K": 59.80634920634921,
+      "success": 0.7850354311732712,
+      "hit": 0.8709611999549671,
+      "tools_iou": 0.8527457666359844,
+      "clutter_iou": 0.8501957015860916,
+      "median_k": 58.0,
+      "p90_k": 67.0,
+      "min_k": 37,
+      "max_k": 85,
+      "samples": 720,
+      "evaluation": "label_replay",
+      "source": "outputs/mosa_low_k_20261019/area_final",
+      "method": "full_score85_a52"
+    },
+    {
+      "name": "max_masks100",
+      "max_masks": 100,
+      "score_thresh": 0.85,
+      "mask_nms_thresh": 0.95,
+      "min_mask_area": 52,
+      "Q": 0.8494712112377287,
+      "K": 55.59761904761905,
+      "success": 0.7813020038274598,
+      "hit": 0.8685010128149768,
+      "tools_iou": 0.8513834738440139,
+      "clutter_iou": 0.8475589486314435,
+      "median_k": 54.0,
+      "p90_k": 60.0,
+      "min_k": 37,
+      "max_k": 73,
+      "samples": 720,
+      "evaluation": "full_inference",
+      "source": "outputs/mosa_low_k_20261019/full_max100_score85_a52",
+      "method": "mosa"
+    }
+  ],
+  "delta_100_minus_150": {
+    "Q": -0.0019995228733092896,
+    "K": -4.208730158730162,
+    "success": -0.003733427345811391,
+    "hit": -0.0024601871399902997,
+    "tools_iou": -0.0013622927919705319,
+    "clutter_iou": -0.0026367529546480473,
+    "region_reduction_percent": 7.037263124369664,
+    "oracle_iou_drop_percentage_points": 0.19995228733092896,
+    "success_drop_percentage_points": 0.3733427345811391,
+    "hit_drop_percentage_points": 0.24601871399902997
+  },
+  "audit": {
+    "success": true,
+    "validated_partitions": 720,
+    "recomputed_evaluations": 35,
+    "source_labels_equal_after_merge": null,
+    "summary": [
+      {
+        "subset": "clutter",
+        "method": "mosa",
+        "status": "complete",
+        "expected_images": 90,
+        "completed_images": 90,
+        "failed_images": 0,
+        "failure_rate": 0.0,
+        "class_count": 7,
+        "mean_oracle_iou": 0.8475589486314435,
+        "success_rate_080": 0.7674603174603174,
+        "mean_point_hit_rate": 0.8199947891614557,
+        "mean_region_count": 56.93333333333334,
+        "mean_wall_seconds": 0.4278455906130451
+      },
+      {
+        "subset": "tools",
+        "method": "mosa",
+        "status": "complete",
+        "expected_images": 630,
+        "completed_images": 630,
+        "failed_images": 0,
+        "failure_rate": 0.0,
+        "class_count": 7,
+        "mean_oracle_iou": 0.8513834738440139,
+        "success_rate_080": 0.7951436901946023,
+        "mean_point_hit_rate": 0.917007236468498,
+        "mean_region_count": 54.26190476190476,
+        "mean_wall_seconds": 0.42631428781166925
+      }
+    ]
+  },
+  "manifest_sha256": "4bbc292f9148b4b88150ea9648f449a3e792d4c3c0ad31ba2679188b2939558d",
+  "identical_implementation_and_package_versions": true,
+  "identical_frozen_manifests": true,
+  "config_change": {
+    "max_masks": [
+      150,
+      100
+    ]
+  },
+  "paired_region_counts": {
+    "decreased": 634,
+    "unchanged": 77,
+    "increased": 9
+  },
+  "note": "Q/K/success/hit are equal means of tools/clutter summaries; K distribution is pooled across 720 images. Same development manifest, not an independent test set. Baseline area=52 uses previously audited label replay from area=32. Timing is not compared: prior runs overlapped on GPU. Baseline used cuda:0 and this run used identical-model GPU cuda:1."
+}

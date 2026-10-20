@@ -2,15 +2,16 @@
 
 当前实现 **Dense Partition / Exhaustive Segmentation（全覆盖分割）** 及其 **UMD Affordance 分区评测**，作为后续 Affordance 研究的基础。输入一张 RGB 图片，输出一组 Mask，严格满足：**每个像素恰好属于一个 Mask**。目前支持 SAM 2.1 small、UnSAMv2+、Semantic-SAM、PartGLEE RN50、MoSA R50 和 SLIC，统一通过 `DensePartition` 接口调用。评测器使用 UMD 标签评价这些区域的表达能力，尚未接入任务决策模型。
 
-最终采用 **MoSA whole-image R50**，Python API 默认使用第 5 轮选定的配置：`max_masks=250`、`score_thresh=0.25`、`mask_nms_thresh=0.95`。六方法选型阶段共完成五轮完整比较；结果与选择理由见 [07：UMD 720 张评测报告](docs/07_umd720_benchmark_report.md)。命令行比较入口不指定 `--method` 时仍运行全部六种方法；只运行最终方案可用 `python dense_partition.py --method mosa`。
+最终采用 **MoSA whole-image R50**，当前日常默认配置为 `max_masks=100`、`score_thresh=0.9`、`mask_nms_thresh=0.85`、`MIN_MASK_AREA=100`。六方法选型阶段共完成五轮完整比较，历史基线为 `250 / 0.25 / 0.95`、最小面积 `16`；结果与选择理由见 [07：UMD 720 张评测报告](docs/07_umd720_benchmark_report.md)。命令行比较入口不指定 `--method` 时仍运行全部六种方法；只运行最终方案可用 `python dense_partition.py --method mosa`。
 
-后续 [08：MoSA 专项调参](docs/08_mosa_parameter_tuning.md) 推荐使用 `250 / 0.40 / 0.95` 和最小面积 `36`：同一份 720 张开发清单上 Oracle IoU 为 **0.85835**，K 为 **101.73**，比上述默认减少 **19.7%** 的区域。三档参数以独立 JSON 提供，未覆盖 `config.py`；使用方式和质量取舍见报告。
+后续 [08：MoSA 专项调参](docs/08_mosa_parameter_tuning.md) 推荐使用 `250 / 0.40 / 0.95` 和最小面积 `36`：同一份 720 张开发清单上 Oracle IoU 为 **0.85835**，K 为 **101.73**，比上述历史基线减少 **19.7%** 的区域。三档参数以独立 JSON 提供；使用方式和质量取舍见报告。
 
-继续降低区域数的结果见 [09：MoSA 低 K 调参](docs/09_mosa_low_k_tuning.md)：`150 / 0.85 / 0.95`、最小面积 `52` 达到 Oracle IoU **0.85147**、平均 K **59.81**；另提供 K≈65 和 K≈50 的配置。[采用 K≈60 配置](docs/assets/mosa_low_k_20261019/k60_config.json)可比上一轮 K=75.49 的低 K 备选再减少 **20.8%** 的区域，IoU 下降约 **0.24 个百分点**。这些都是同一开发清单上的调参结果。
+继续降低区域数的结果见 [09：MoSA 低 K 调参](docs/09_mosa_low_k_tuning.md)：在 **Oracle IoU ≥ 0.845** 的目标下，联合搜索 50–100 候选的分数、NMS 和面积参数，当前推荐 `100 / 0.89 / 0.85`、最小面积 `121`，真实推理 Oracle IoU **0.84503289**、平均 K **42.70**。[采用推荐配置](docs/assets/mosa_q0845_20261019/selected_config.json)可比此前 100 候选初始对照减少 **23.20%** 的区域。六档均完成 720 张真实推理与复核；这些仍是同一开发清单上的调参结果。
 
 ## 代码结构
 
 ```text
+main.py                # 单张图片的 MoSA 分割、Mask 导出和交互可视化入口
 dense_partition.py     # 抽象基类、六种实现、统一工厂及命令行入口
 affordance_benchmark.py # 评测基类、UMD 实现、指标、CSV/页面导出及命令行入口
 config.py              # 日常调节项、设备、debug 图片
@@ -44,7 +45,7 @@ requirements-partglee.txt
 requirements-mosa.txt
 ```
 
-全覆盖分割功能的命令行逻辑直接写在 `dense_partition.py` 的 `if __name__ == '__main__':` 中，负责参数解析、单图或批量运行及结果导出。
+日常单图使用 `main.py`，内部调用 `DensePartition.create('mosa').segment()`；多方法比较和批量分割的命令行入口保留在 `dense_partition.py`。
 
 所有学习模型由 `common/models.py` 统一通过当前 Conda Python 启动独立子进程。每个模型只加载一次，在同一个进程中连续处理所有图片，随后退出释放显存，再启动下一个模型。PartGLEE 和 MoSA 的适配实现分别位于 `common/partglee.py`、`common/mosa.py`；Semantic-SAM 的尺寸还原和兼容处理在 `common/models.py` 内完成。本项目使用 `common` 包名，与上游包可以同时导入。
 
@@ -122,7 +123,7 @@ python scripts/download_unsamv2.py
 | --- | --- |
 | `DEFAULT_METHOD` | Python API 默认 `mosa`；命令行未指定 `--method` 时运行全部方法 |
 | `DEVICE` | 当前 `cuda:1`，单卡机器改为 `cuda:0`。SLIC 始终使用 CPU |
-| `MIN_MASK_AREA` | 所有方法统一的后处理阈值，默认 `16`：面积严格小于 16 个原图像素的区域并入邻居；`0` 关闭 |
+| `MIN_MASK_AREA` | 所有方法统一的后处理阈值，默认 `100`：面积严格小于 100 个原图像素的区域并入邻居；`0` 关闭 |
 | `UNSAMV2_PLUS.granularity` | 范围 `[0.1, 1.0]`，默认 `0.2`；越小倾向越细，但过小可能漏掉物体/部件，并非越小越好；HF Demo 初始值为 `0.15` |
 | `UNSAMV2_PLUS.pred_iou_thresh` | 对应 Predicted IoU threshold；降低保留更多候选，HF Demo 默认 `0.77` |
 | `UNSAMV2_PLUS.stability_score_thresh` | 对应 Stability threshold；降低筛选更宽松，HF Demo 默认 `0.9` |
@@ -130,12 +131,12 @@ python scripts/download_unsamv2.py
 | `PARTGLEE.max_object_masks` / `max_part_masks` | 全图候选输出上限，默认 `50` / `500`；不改变训练时的 query 数，不代表真实物体或部件数量 |
 | `PARTGLEE.score_thresh` | 默认 `0.25`；过滤类别概率 × Mask 内平均概率低于阈值的候选 |
 | `PARTGLEE.mask_nms_thresh` | 默认 `0.95`；同层级 Mask 的 IoU 严格超过阈值时保留高分候选，物体与部件不互相抑制 |
-| `MOSA.max_masks` | 默认 `250`，按前景分类概率选取整图 top-k；范围 `[1, 2000]`，不改变网络训练时的 2000 个 query |
-| `MOSA.score_thresh` | 默认 `0.25`，过滤前景 softmax 概率 × Mask 内平均概率低于阈值的候选；`0` 关闭分数过滤 |
-| `MOSA.mask_nms_thresh` | 默认 `0.95`，按 Mask IoU 去除高度重复候选；`1` 关闭，显著更小的嵌套部件保留 |
+| `MOSA.max_masks` | 默认 `100`，按前景分类概率选取整图 top-k；范围 `[1, 2000]`，不改变网络训练时的 2000 个 query |
+| `MOSA.score_thresh` | 默认 `0.9`，过滤前景 softmax 概率 × Mask 内平均概率低于阈值的候选；`0` 关闭分数过滤 |
+| `MOSA.mask_nms_thresh` | 默认 `0.85`，按 Mask IoU 去除高度重复候选；`1` 关闭，显著更小的嵌套部件保留 |
 | `SLIC` | `n_segments` 越大越细；`compactness` 控制形状规则性，`sigma` 控制平滑；目标数不等于最终 Mask 数 |
 | `DEBUG_IMAGES` | 5 张不同的 debug 图片，只有图片路径，不包含任务指令或标注 |
-| `OUTPUT_DIR` | 两个脚本共用的输出根目录，默认 `outputs/`；每次自动创建“脚本名_时间戳”子目录 |
+| `OUTPUT_DIR` | 命令行入口共用的输出根目录，默认 `outputs/`；每次自动创建“脚本名_时间戳”子目录 |
 
 SAM 2.1 直接使用官方自动生成器默认值。UnSAMv2+ 独立使用上述三个控制项，其余采样设置参考 [官方 HF Demo 源码](https://huggingface.co/spaces/yujunwei04/UnSAMv2/blob/675a2bceabf284b69d5d537a3aa798b53c50a8ff/app.py)，不再与 SAM 共用一组生成参数。模型资源与内部设置在 `common/settings.py`；`model_config='configs/…yaml'` 是第三方包内部资源路径。
 
@@ -145,7 +146,7 @@ PartGLEE 使用 `sa1b_joint` 分支和固定的 `['object', 'part']` 词表，�
 
 MoSA 使用 [官方 whole-image R50 分支](https://github.com/360CVGroup/MoSA/tree/7909eed2516607b40653fa5cd88ba23147131850/Adaption_to_Segment_Anything/whole_image_segmentation)，输入只有 RGB。网络有一个前景类别和一个 no-object 输出，所有 2000 个 query 联合处理整张图片，不要求物体名称或物体 Mask。保持官方短边 1024、长边上限 2048 的缩放，按前景 softmax 概率选取 top-k，再分批将 logits 还原至填充尺寸、去除填充、双线性还原到原图，以 0 为阈值二值化。分批只降低尺寸还原阶段的显存占用，不改变网络结构、候选选择和分数定义。权重以 `strict=True` 加载，避免静默漏载。
 
-MoSA 的 `score_thresh=0.25` 和 `mask_nms_thresh=0.95` 是本框架增加的候选过滤，官方 instance 路径没有这两步。需要比较官方候选时设为 `0` / `1`，仅移除空 Mask。`raw_proposals` 保存原生 `score`、`class_score`、`mask_score`、`query_index`、筛选前 `source_index`、原图 `area` / `bbox`，不输出语义类别或虚构物体—部件归属。`backend.filtering` 记录空候选、低分和重复候选的数量；其他元数据包括实际源码、输入/填充尺寸、加载与推理时间、过滤时间和峰值 CUDA 张量内存。默认整图推理对显存需求较高，若有必要可在配置副本中降低 `preprocess.short_edge` / `max_size`，并保留参数快照进行比较。
+MoSA 的 `score_thresh` 和 `mask_nms_thresh` 是本框架增加的候选过滤，当前默认分别为 `0.9` 和 `0.85`，官方 instance 路径没有这两步。需要比较官方候选时设为 `0` / `1`，仅移除空 Mask。`raw_proposals` 保存原生 `score`、`class_score`、`mask_score`、`query_index`、筛选前 `source_index`、原图 `area` / `bbox`，不输出语义类别或虚构物体—部件归属。`backend.filtering` 记录空候选、低分和重复候选的数量；其他元数据包括实际源码、输入/填充尺寸、加载与推理时间、过滤时间和峰值 CUDA 张量内存。默认整图推理对显存需求较高，若有必要可在配置副本中降低 `preprocess.short_edge` / `max_size`，并保留参数快照进行比较。
 
 最终分区先消除重叠、补齐未覆盖区域并拆分连通域，再按 `MIN_MASK_AREA` 合并小区域。合并在 `common/partition.py` 的 `merge_small_regions()` 中实现，由 `DensePartition.segment()` 对六种方法统一调用：从最小区域开始，并入共享边界最长的上下左右相邻区域；共享边界相同时优先面积更大的邻居，再按区域 ID 决定。每次合并后更新面积和邻接关系，直到所有区域达到阈值或整图仅剩一个区域；若整张图片面积就小于阈值，保留这一个区域。阈值 `16` 用于清除少量像素的碎片，面积恰好 16 的区域保留；设置为 `0` 恢复不合并的行为。
 
@@ -188,6 +189,31 @@ result = DensePartition.create("slic", config=settings).segment("your_image.jpg"
 `DensePartition` 是抽象基类；`SAM21Partition`、`UnSAMv2PlusPartition`、`SemanticSAMPartition`、`PartGLEEPartition`、`MoSAPartition`、`SLICPartition` 均位于 `dense_partition.py`。新增方法实现 `_segment_rgb()`，由基类 `segment()` 统一读取图片、记录配置并验证输出契约。
 
 ## 命令行与可视化
+
+### 单张图片：main.py
+
+在上述 `systemone-affordance` 环境中运行：
+
+```bash
+python main.py --image your_image.jpg
+
+# 使用已调好的低 K 配置，并指定设备和新的输出目录
+python main.py --image your_image.jpg \
+  --config docs/assets/mosa_low_k_20261019/k60_config.json \
+  --device cuda:1 --output outputs/my_mosa_image
+
+# 也可以直接覆盖常用参数
+python main.py --image your_image.jpg \
+  --max-masks 100 --score-thresh 0.85 --mask-nms-thresh 0.95 --min-mask-area 52
+```
+
+入口固定使用 MoSA，仅需提供图片，无需类别、文字提示或物体 Mask。参数优先级为命令行覆盖项 > `--config` 中的 `mosa` 配置 > `config.py`；不传配置时沿用现有默认参数。`max_masks` 是候选预算，不是最终区域数的硬上限。
+
+默认生成 `outputs/main_<时间戳>/`；指定 `--output` 时必须是新目录。打开 `index.html` 可查看原图、原始候选、最终边界、彩色分区和叠加图，点击像素可选中区域并下载该区域的二值 PNG。静态总览保存在 `overview.jpg`；`partition/` 下保存原尺寸的 `comparison.jpg`、`overlay.png`、`boundaries.png`、`colors.png`、`labels.npy`、`masks.npz`、`raw_masks.npz` 和 `metadata.json`。`summary.json` 记录实际配置、初始化与分割耗时及完成状态。
+
+`labels.npy` 为原图分辨率的 `uint32[H,W]`，区域 ID 为 `1…K`，每个像素恰好属于一个区域，背景也包含在分区内。`masks.npz` 使用位压缩，可通过 `common.io.iter_masks(path)` 逐个读取二值 Mask。
+
+### 多方法比较与批量运行
 
 ```bash
 # 默认使用 config.DEBUG_IMAGES，对比全部六种方法

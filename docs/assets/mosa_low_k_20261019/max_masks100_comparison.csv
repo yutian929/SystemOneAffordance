@@ -1,0 +1,3 @@
+name,max_masks,score_thresh,mask_nms_thresh,min_mask_area,Q,K,success,hit,tools_iou,clutter_iou,median_k,p90_k,min_k,max_k,samples,evaluation,source,method
+max_masks150_k60,150,0.85,0.95,52,0.851470734111038,59.80634920634921,0.7850354311732712,0.8709611999549671,0.8527457666359844,0.8501957015860916,58.0,67.0,37,85,720,label_replay,outputs/mosa_low_k_20261019/area_final,full_score85_a52
+max_masks100,100,0.85,0.95,52,0.8494712112377287,55.59761904761905,0.7813020038274598,0.8685010128149768,0.8513834738440139,0.8475589486314435,54.0,60.0,37,73,720,full_inference,outputs/mosa_low_k_20261019/full_max100_score85_a52,mosa
